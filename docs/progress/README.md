@@ -94,3 +94,17 @@ horizon. An ozone-like absorption term keeps sunsets peach/orange instead of yel
 
 The same shaders seen from space: a glowing rim, a soft terminator (the planet's shadow fades
 over a few degrees), oceans, and a night side lit only by starlight.
+
+### 012 — Jetpack view over the bay
+
+![012](012-m2-jetpack-view-over-the-bay.jpg)
+
+Sixty metres up on the jetpack: the lagoon from above, beaches along the shoreline, haze
+softening the far hills.
+
+### 013 — Night at the spawn point
+
+![013](013-m2-night-at-the-spawn.jpg)
+
+After sunset: the stars come back as the sky darkens, and a simple eye-adaptation raises the
+exposure so the starlit landscape stays readable.
