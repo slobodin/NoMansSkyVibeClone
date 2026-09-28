@@ -1,6 +1,6 @@
 /**
- * Everything that defines a planet's surface, as plain data. The config travels to the Web
- * Workers with every chunk job (structured clone), so it must not contain classes or functions.
+ * Everything that defines a planet or moon, as plain data. The config travels to the Web Workers
+ * with every chunk job (structured clone), so it must not contain classes or functions.
  */
 export interface PlanetConfig {
   name: string;
@@ -13,11 +13,34 @@ export interface PlanetConfig {
   axialTilt: number;
   /** Surface gravity in m/s^2 (a game parameter, not derived from mass). */
   gravity: number;
+  orbit: OrbitConfig;
+  /**
+   * Sphere of influence, metres from the centre: inside it, the camera travels along with this
+   * body (see SolarSystem.bodyAt). Must contain the orbits of the body's moons.
+   */
+  soiRadius: number;
   terrain: TerrainShapeConfig;
   colors: TerrainColorConfig;
-  atmosphere: AtmosphereConfig;
+  /** Air (render/atmosphere.ts); absent = airless, black sky even at noon. */
+  atmosphere?: AtmosphereConfig;
   /** Water filling everything below sea level (render/ocean.ts); absent = dry planet. */
   ocean?: OceanConfig;
+}
+
+/**
+ * A circular orbit "on rails" (world/orbit.ts): the position is a pure function of time.
+ */
+export interface OrbitConfig {
+  /** Name of the body this one circles: the star for planets, a planet for moons. */
+  parent: string;
+  /** Distance from the parent's centre, metres. */
+  radius: number;
+  /** Time for one full orbit, seconds. */
+  period: number;
+  /** Angle along the orbit at time 0, radians. */
+  phase: number;
+  /** Tilt of the orbital plane, radians. */
+  inclination: number;
 }
 
 export interface OceanConfig {

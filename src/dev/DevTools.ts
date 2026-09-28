@@ -54,7 +54,8 @@ async function settle(game: Game, maxFrames: number): Promise<number> {
   let quietFrames = 0;
   for (let frame = 0; frame < maxFrames; frame++) {
     game.tick(0);
-    quietFrames = game.planet.terrain.busy ? 0 : quietFrames + 1;
+    const busy = game.system.bodies.some((body) => body.terrain.busy);
+    quietFrames = busy ? 0 : quietFrames + 1;
     if (quietFrames >= 3) return frame;
     await yieldToEventLoop();
   }

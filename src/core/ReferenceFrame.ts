@@ -21,7 +21,7 @@ export interface ReferenceFrame {
 }
 
 export const UNIVERSE_FRAME: ReferenceFrame = {
-  name: 'universe',
+  name: 'space (star frame)',
   position: new THREE.Vector3(),
   quaternion: new THREE.Quaternion(),
 };

@@ -20,10 +20,12 @@ import type { PlanetConfig } from '../planet/PlanetConfig';
  * total transmittance along the ray. Samples in the planet's shadow receive no sunlight: that is
  * night, and the dark band that sweeps up the sky at dusk.
  *
- * The GLSL below is shared by the full-screen pass (sky and aerial perspective, see
- * RenderPipeline.ts) and the terrain shader (sunlight reaching the ground), so the ground and
- * the sky always agree on the colour of the light. All positions are in world space, which the
- * floating origin makes camera-relative: the camera is at (0, 0, 0).
+ * Every function takes an `Atmosphere` struct describing one planet's air, because the
+ * full-screen pass (RenderPipeline.ts) draws the atmospheres of all visible planets, while the
+ * terrain shader uses its own planet's to light the ground - so ground and sky always agree on
+ * the colour of the light. A planet without air has radius == planetRadius and zero coefficients.
+ * All positions are in world space, which the floating origin makes camera-relative: the camera
+ * is at (0, 0, 0).
  */
 
 export const ATMOSPHERE_GLSL = /* glsl */ `
@@ -31,17 +33,19 @@ export const ATMOSPHERE_GLSL = /* glsl */ `
   #define PI 3.141592653589793
   #endif
 
-  uniform vec3 uPlanetCenter;       // world space
-  uniform float uPlanetRadius;      // sea level
-  uniform float uAtmosphereRadius;  // top of the atmosphere
-  uniform vec3 uRayleighScattering; // 1/m, RGB
-  uniform float uRayleighScaleHeight;
-  uniform float uMieScattering;     // 1/m
-  uniform float uMieScaleHeight;
-  uniform float uMieAnisotropy;
-  uniform vec3 uAbsorption;         // 1/m, RGB: ozone-like absorption
-  uniform vec3 uSunDirection;       // unit vector towards the sun
-  uniform vec3 uSunIntensity;       // sunlight above the atmosphere
+  struct Atmosphere {
+    vec3 center;          // planet centre, world space
+    float planetRadius;   // sea level
+    float radius;         // top of the atmosphere (== planetRadius: no air)
+    vec3 rayleigh;        // Rayleigh scattering at sea level, 1/m per RGB channel
+    float rayleighHeight; // scale height: density falls by e every this many metres
+    float mie;            // Mie scattering at sea level, 1/m
+    float mieHeight;
+    float mieG;           // Mie anisotropy
+    vec3 absorption;      // ozone-like absorption at sea level, 1/m per RGB channel
+    vec3 sunDirection;    // unit vector from this planet towards the sun
+    vec3 sunIntensity;    // sunlight above the atmosphere
+  };
 
   // Where a ray (origin + t * dir, dir normalised) enters and leaves a sphere: (tNear, tFar).
   // A miss returns tNear > tFar. Written to avoid subtracting nearly equal large numbers,
@@ -59,29 +63,33 @@ export const ATMOSPHERE_GLSL = /* glsl */ `
     return vec2(min(t0, q), max(t0, q));
   }
 
+  bool hasAir(Atmosphere a) {
+    return a.radius > a.planetRadius;
+  }
+
   // Density relative to sea level: x = Rayleigh, y = Mie.
-  vec2 atmosphereDensity(vec3 p) {
-    float altitude = max(length(p - uPlanetCenter) - uPlanetRadius, 0.0);
-    return exp(-altitude / vec2(uRayleighScaleHeight, uMieScaleHeight));
+  vec2 atmosphereDensity(Atmosphere a, vec3 p) {
+    float altitude = max(length(p - a.center) - a.planetRadius, 0.0);
+    return exp(-altitude / vec2(a.rayleighHeight, a.mieHeight));
   }
 
   // exp(-optical depth): the fraction of light that makes it through. Mie also absorbs a
-  // little, hence extinction = 1.1 x scattering. uAbsorption is an ozone-like gas that absorbs
+  // little, hence extinction = 1.1 x scattering. 'absorption' is an ozone-like gas that absorbs
   // (without scattering) mostly green: it deepens the blue of the sky and, at sunset, removes the
   // green that Rayleigh scattering would otherwise add back - sunsets come out orange-red
   // instead of yellow. (Real ozone sits in a layer; here it simply follows the air density.)
-  vec3 transmittance(vec2 opticalDepth) {
-    return exp(-((uRayleighScattering + uAbsorption) * opticalDepth.x + uMieScattering * 1.1 * opticalDepth.y));
+  vec3 transmittance(Atmosphere a, vec2 opticalDepth) {
+    return exp(-((a.rayleigh + a.absorption) * opticalDepth.x + a.mie * 1.1 * opticalDepth.y));
   }
 
   // Integral of the density from p towards the sun, up to the top of the atmosphere.
-  vec2 opticalDepthToSun(vec3 p) {
+  vec2 opticalDepthToSun(Atmosphere a, vec3 p) {
     const int STEPS = 6;
-    float rayLength = raySphere(p, uSunDirection, uPlanetCenter, uAtmosphereRadius).y;
+    float rayLength = max(raySphere(p, a.sunDirection, a.center, a.radius).y, 0.0);
     float ds = rayLength / float(STEPS);
     vec2 depth = vec2(0.0);
     for (int i = 0; i < STEPS; i++) {
-      depth += atmosphereDensity(p + uSunDirection * (float(i) + 0.5) * ds);
+      depth += atmosphereDensity(a, p + a.sunDirection * (float(i) + 0.5) * ds);
     }
     return depth * ds;
   }
@@ -91,19 +99,29 @@ export const ATMOSPHERE_GLSL = /* glsl */ `
   // horizontal. The sun is visible while its elevation is above that, and we fade over a few
   // degrees around it: a hard on/off test would draw razor-sharp shadow edges in the sky, while
   // real ones are softened by the sun's size and by light scattering more than once.
-  float sunVisibility(vec3 p) {
-    vec3 toP = p - uPlanetCenter;
+  float sunVisibility(Atmosphere a, vec3 p) {
+    vec3 toP = p - a.center;
     float r = length(toP);
-    float sunElevation = asin(clamp(dot(toP, uSunDirection) / r, -1.0, 1.0));
-    float horizonDip = acos(clamp(uPlanetRadius / r, 0.0, 1.0));
+    float sunElevation = asin(clamp(dot(toP, a.sunDirection) / r, -1.0, 1.0));
+    float horizonDip = acos(clamp(a.planetRadius / r, 0.0, 1.0));
     return smoothstep(-horizonDip - 0.035, -horizonDip + 0.035, sunElevation);
   }
 
-  // Sunlight arriving at p, after its trip through the atmosphere.
-  vec3 sunlightAt(vec3 p) {
-    float visibility = sunVisibility(p);
+  // Sunlight arriving at p, after its trip through the atmosphere (if there is one).
+  vec3 sunlightAt(Atmosphere a, vec3 p) {
+    float visibility = sunVisibility(a, p);
     if (visibility <= 0.0) return vec3(0.0);
-    return uSunIntensity * transmittance(opticalDepthToSun(p)) * visibility;
+    vec3 sun = a.sunIntensity * visibility;
+    return hasAir(a) ? sun * transmittance(a, opticalDepthToSun(a, p)) : sun;
+  }
+
+  // Skylight on a surface facing 'up': the sky glows and lights the ground from all around. A
+  // cheap estimate: the fraction of sunlight the air column overhead scatters (more blue than
+  // red), fading out after sunset. No air, no skylight - shadows on airless moons are black.
+  vec3 skyIrradiance(Atmosphere a, vec3 up) {
+    vec3 zenithScatter = 1.0 - exp(-(a.rayleigh * a.rayleighHeight + a.mie * a.mieHeight));
+    float daylight = smoothstep(-0.25, 0.3, dot(up, a.sunDirection));
+    return a.sunIntensity * zenithScatter * 0.6 * daylight;
   }
 
   float rayleighPhase(float cosAngle) {
@@ -119,7 +137,7 @@ export const ATMOSPHERE_GLSL = /* glsl */ `
 
   // Single scattering along origin + t * dir for t in [tStart, tEnd].
   // Returns the in-scattered light; 'transmit' receives the transmittance of the whole segment.
-  vec3 scatterAlongRay(vec3 origin, vec3 dir, float tStart, float tEnd, int steps, out vec3 transmit) {
+  vec3 scatterAlongRay(Atmosphere a, vec3 origin, vec3 dir, float tStart, float tEnd, int steps, out vec3 transmit) {
     float ds = (tEnd - tStart) / float(steps);
     vec2 viewDepth = vec2(0.0);
     vec3 rayleigh = vec3(0.0);
@@ -127,38 +145,72 @@ export const ATMOSPHERE_GLSL = /* glsl */ `
     for (int i = 0; i < 32; i++) {
       if (i >= steps) break;
       vec3 p = origin + dir * (tStart + (float(i) + 0.5) * ds);
-      vec2 density = atmosphereDensity(p) * ds;
+      vec2 density = atmosphereDensity(a, p) * ds;
       viewDepth += density;
-      float visibility = sunVisibility(p);
+      float visibility = sunVisibility(a, p);
       if (visibility <= 0.0) continue;
-      vec3 t = transmittance(viewDepth + opticalDepthToSun(p)) * visibility;
+      vec3 t = transmittance(a, viewDepth + opticalDepthToSun(a, p)) * visibility;
       rayleigh += density.x * t;
       mie += density.y * t;
     }
-    transmit = transmittance(viewDepth);
-    float cosAngle = dot(dir, uSunDirection);
-    return uSunIntensity * (
-      rayleigh * uRayleighScattering * rayleighPhase(cosAngle) +
-      mie * uMieScattering * miePhase(cosAngle, uMieAnisotropy));
+    transmit = transmittance(a, viewDepth);
+    float cosAngle = dot(dir, a.sunDirection);
+    return a.sunIntensity * (
+      rayleigh * a.rayleigh * rayleighPhase(cosAngle) +
+      mie * a.mie * miePhase(cosAngle, a.mieG));
   }
 `;
 
-/** The uniforms ATMOSPHERE_GLSL declares, as one object that several materials can share. */
-export type AtmosphereUniforms = ReturnType<typeof createAtmosphereUniforms>;
+/**
+ * JS mirror of the GLSL `Atmosphere` struct (same field names): three.js uploads a plain object
+ * like this as a struct uniform. One per planet; the terrain material and the composite pass
+ * reference the same object, so updating it once per frame updates both.
+ */
+export interface AtmosphereParams {
+  center: THREE.Vector3;
+  planetRadius: number;
+  radius: number;
+  rayleigh: THREE.Vector3;
+  rayleighHeight: number;
+  mie: number;
+  mieHeight: number;
+  mieG: number;
+  absorption: THREE.Vector3;
+  sunDirection: THREE.Vector3;
+  sunIntensity: THREE.Vector3;
+}
 
-export function createAtmosphereUniforms(config: PlanetConfig, sunIntensity: THREE.Vector3) {
+/** No air at all: for airless bodies and for unused slots of uniform arrays. */
+export function emptyAtmosphereParams(): AtmosphereParams {
+  return {
+    center: new THREE.Vector3(),
+    planetRadius: 0,
+    radius: 0,
+    rayleigh: new THREE.Vector3(),
+    rayleighHeight: 1,
+    mie: 0,
+    mieHeight: 1,
+    mieG: 0,
+    absorption: new THREE.Vector3(),
+    sunDirection: new THREE.Vector3(1, 0, 0),
+    sunIntensity: new THREE.Vector3(),
+  };
+}
+
+export function createAtmosphereParams(config: PlanetConfig, sunIntensity: THREE.Vector3): AtmosphereParams {
   const a = config.atmosphere;
   return {
-    uPlanetCenter: { value: new THREE.Vector3() },
-    uPlanetRadius: { value: config.radius },
-    uAtmosphereRadius: { value: config.radius + a.height },
-    uRayleighScattering: { value: new THREE.Vector3(...a.rayleighScattering) },
-    uRayleighScaleHeight: { value: a.rayleighScaleHeight },
-    uMieScattering: { value: a.mieScattering },
-    uMieScaleHeight: { value: a.mieScaleHeight },
-    uMieAnisotropy: { value: a.mieAnisotropy },
-    uAbsorption: { value: new THREE.Vector3(...a.absorption) },
-    uSunDirection: { value: new THREE.Vector3(1, 0, 0) },
-    uSunIntensity: { value: sunIntensity },
+    center: new THREE.Vector3(),
+    planetRadius: config.radius,
+    radius: config.radius + (a?.height ?? 0),
+    rayleigh: new THREE.Vector3(...(a?.rayleighScattering ?? [0, 0, 0])),
+    // Scale heights must not be 0 even without air: the density function divides by them.
+    rayleighHeight: a?.rayleighScaleHeight ?? 1,
+    mie: a?.mieScattering ?? 0,
+    mieHeight: a?.mieScaleHeight ?? 1,
+    mieG: a?.mieAnisotropy ?? 0,
+    absorption: new THREE.Vector3(...(a?.absorption ?? [0, 0, 0])),
+    sunDirection: new THREE.Vector3(1, 0, 0),
+    sunIntensity,
   };
 }

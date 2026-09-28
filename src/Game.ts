@@ -2,34 +2,31 @@ import * as THREE from 'three';
 import { FreeFlyController } from './controls/FreeFlyController';
 import { PlayerController } from './controls/PlayerController';
 import { Input } from './core/Input';
-import { directionToFrame, orientationToFrame, orientationToUniverse, UNIVERSE_FRAME } from './core/ReferenceFrame';
+import { directionToFrame, orientationToFrame, orientationToUniverse, UNIVERSE_FRAME, type ReferenceFrame } from './core/ReferenceFrame';
 import { Universe } from './core/Universe';
 import { saveScreenshot } from './dev/DevTools';
 import { ChunkWorkerPool } from './planet/ChunkWorkerPool';
-import { Planet } from './planet/Planet';
+import type { Planet } from './planet/Planet';
 import { RenderPipeline } from './render/RenderPipeline';
 import { createStarfield } from './render/Starfield';
 import { DebugHud, formatDistance, formatSpeed } from './ui/DebugHud';
-import { VERDANT } from './world/bodies';
-import { Star } from './world/Star';
+import { BODIES, HOME, SUN } from './world/bodies';
+import { SolarSystem } from './world/SolarSystem';
 import { TestBeacon } from './world/TestBeacon';
 
 const FOV = 70; // vertical field of view, degrees
 const NEAR = 0.1; // m
 const FAR = 1e9; // m. The logarithmic depth buffer copes with a huge far/near ratio.
 
-// The star sits at the universe origin; Verdant 180 km away (no orbits until M3).
-const STAR_POSITION = new THREE.Vector3(0, 0, 0);
-const PLANET_POSITION = new THREE.Vector3(-1, -0.35, -0.55).setLength(180_000);
-/** The jitter test from M0: a small structure 500 km from the planet. */
-const BEACON_POSITION = PLANET_POSITION.clone().add(new THREE.Vector3(500_000, 0, 0));
-/** Where the player starts: planet-local direction and facing - flat ground in a valley by a bay. */
+/** The jitter test from M0: a small structure 560 km from the star, beyond the outer planet. */
+const BEACON_POSITION = new THREE.Vector3(0, 0, 560_000);
+/** Where the player starts on HOME: local direction and facing - flat ground by a bay. */
 const SPAWN_DIRECTION = new THREE.Vector3(-0.1205, -0.0173, 0.9926);
 const SPAWN_HEADING = new THREE.Vector3(0.9927, 0, 0.1205);
 /** Sun elevation (degrees, rising) at the spawn point when the game starts. */
 const START_SUN_ELEVATION = 25;
-/** Within this many planet radii the free camera rides along with the planet's rotation. */
-const PLANET_FRAME_RADII = 3;
+/** Within this many radii of a body the free camera turns with it (hovering over the ground). */
+const ROTATING_FRAME_RADII = 3;
 /** T cycles through these game-time multipliers (the day/night cycle speeds up). */
 const TIME_SCALES = [1, 10, 60, 300];
 /** Exposure by day and by night: a crude stand-in for the eye adapting to the dark. */
@@ -42,7 +39,8 @@ Space    jump, hold for jetpack (swim up in water)
 C        dive (in water)
 V        toggle free-fly camera (Space/C up/down, Q/E roll, wheel speed)
 T        time speed x1 / x10 / x60 / x300
-1  orbit   2  test beacon (500 km out)   3  respawn on foot
+1-7      fly to Ember, Verdant, Lull, Rime, Sulfa, Nyx, Shard
+0  respawn on foot   9  test beacon
 F2 screenshot   F3 debug panel   F4 terrain LOD view   H help`;
 
 type Mode = 'walk' | 'fly';
@@ -50,7 +48,7 @@ type Mode = 'walk' | 'fly';
 /**
  * Owns the renderer, the scene and all systems, and runs the frame loop:
  *
- *   frame: dt -> update(dt) [time -> planet spin -> controller -> world] -> placeCamera -> render
+ *   frame: dt -> update(dt) [time -> orbits & spins -> controller -> world] -> placeCamera -> render
  */
 export class Game {
   readonly renderer: THREE.WebGLRenderer;
@@ -59,15 +57,14 @@ export class Game {
   readonly input: Input;
   readonly hud: DebugHud;
   readonly workers: ChunkWorkerPool;
-  readonly star: Star;
-  readonly planet: Planet;
+  readonly system: SolarSystem;
+  /** The starting planet. */
+  readonly home: Planet;
   readonly player: PlayerController;
   readonly pipeline: RenderPipeline;
   readonly flyer = new FreeFlyController();
-  /** Which controller drives the camera: walking on the planet, or the free-fly debug camera. */
+  /** Which controller drives the camera: walking on a body, or the free-fly debug camera. */
   mode: Mode = 'walk';
-  /** Unit vector from the planet towards the sun, universe axes. */
-  readonly sunDirection = new THREE.Vector3();
 
   /** Game time in seconds (runs `timeScale` times faster than real time). */
   time = 0;
@@ -78,6 +75,8 @@ export class Game {
   /** The camera's universe pose this frame. */
   readonly cameraPosition = new THREE.Vector3();
   readonly cameraOrientation = new THREE.Quaternion();
+  /** The body whose sphere of influence the camera is in, or null in open space. */
+  currentBody: Planet | null = null;
 
   private lastFrameMs = performance.now();
   private terrainDebugView = 0;
@@ -107,23 +106,25 @@ export class Game {
     // --- Scene content -------------------------------------------------------------------------
     this.universe.sky.add(createStarfield(1337));
 
-    this.star = new Star('Sol', STAR_POSITION, 4000, new THREE.Color(1.0, 0.93, 0.82));
-    this.universe.root.add(this.star.object);
+    this.system = new SolarSystem(SUN, BODIES, this.workers);
+    this.universe.root.add(this.system.star.object);
+    for (const body of this.system.bodies) this.universe.root.add(body.group);
+    this.home = this.system.get(HOME);
 
     // Lights for three's built-in materials (the beacon). The terrain has its own shader.
     this.sunLight = new THREE.DirectionalLight(0xfff4e0, 3);
     this.universe.scene.add(this.sunLight, new THREE.AmbientLight(0x404a66, 0.6));
 
-    this.planet = new Planet(VERDANT, PLANET_POSITION, this.workers, this.star.intensity);
-    this.universe.root.add(this.planet.group);
-    this.pipeline = new RenderPipeline(this.renderer, this.planet.atmosphere, this.planet.ocean);
-    this.star.directionFrom(this.planet.position, this.sunDirection);
+    // One ocean in the system: the composite pass draws the first body that has one.
+    const oceanBody = this.system.bodies.find((body) => body.hasOcean) ?? this.home;
+    this.pipeline = new RenderPipeline(this.renderer, oceanBody.ocean);
 
     this.beacon = new TestBeacon(BEACON_POSITION);
     this.universe.root.add(this.beacon.object);
 
-    this.player = new PlayerController(this.planet);
-    this.chooseStartTime(SPAWN_DIRECTION, START_SUN_ELEVATION);
+    this.system.update(this.time);
+    this.player = new PlayerController(this.home);
+    this.chooseStartTime(this.home, SPAWN_DIRECTION, START_SUN_ELEVATION);
     this.respawn();
 
     window.addEventListener('resize', () => this.resize());
@@ -151,14 +152,17 @@ export class Game {
 
   respawn(): void {
     this.mode = 'walk';
-    this.player.spawn(SPAWN_DIRECTION, SPAWN_HEADING);
+    this.player.spawn(this.home, SPAWN_DIRECTION, SPAWN_HEADING);
   }
 
-  goToOrbit(): void {
-    // On the sunlit side, a little off the planet-sun line.
-    const eye = new THREE.Vector3(0.2, 0.35, 0.92).setLength(32_000).add(this.planet.position);
+  /** Free-fly camera in orbit around `body`, on its sunlit side, looking at it. */
+  goToBody(body: Planet): void {
+    const side = new THREE.Vector3(0, 1, 0).cross(body.sunDirection).normalize();
+    const eye = body.sunDirection.clone().multiplyScalar(0.85).addScaledVector(side, 0.5).add(new THREE.Vector3(0, 0.2, 0));
+    // Close enough to see detail, but inside its sphere of influence (small moons have small ones).
+    eye.setLength(Math.min(body.radius * 3.4, body.config.soiRadius * 0.9)).add(body.position);
     this.mode = 'fly';
-    this.flyer.set(eye, this.planet.position);
+    this.flyer.set(eye, body.position);
   }
 
   goToBeacon(): void {
@@ -168,35 +172,40 @@ export class Game {
   }
 
   /**
-   * Free-fly camera `height` metres above the ground at planet-local direction `dir`, looking
-   * horizontally towards `heading` (planet-local; its vertical part is ignored).
+   * Free-fly camera `height` metres above the ground of `body` at local direction `dir`, looking
+   * horizontally towards `heading` (local; its vertical part is ignored). Handy from the console.
    */
-  goToSurface(dir: THREE.Vector3, height: number, heading: THREE.Vector3, pitchDegrees = -8): void {
+  goToSurface(body: Planet, dir: THREE.Vector3, height: number, heading: THREE.Vector3, pitchDegrees = -8): void {
     const up = dir.clone().normalize();
-    const ground = this.planet.radius + this.planet.terrainHeight(up);
-    const eyeLocal = up.clone().multiplyScalar(ground + height);
+    const eyeLocal = up.clone().multiplyScalar(body.radius + body.terrainHeight(up) + height);
     const forward = heading.clone().addScaledVector(up, -heading.dot(up)).normalize();
     const right = new THREE.Vector3().crossVectors(forward, up).normalize();
     forward.applyAxisAngle(right, THREE.MathUtils.degToRad(pitchDegrees));
-    const eye = this.planet.toUniverse(eyeLocal);
-    const target = this.planet.toUniverse(eyeLocal.clone().add(forward));
+    const eye = body.toUniverse(eyeLocal);
+    const target = body.toUniverse(eyeLocal.clone().add(forward));
     this.mode = 'fly';
-    this.flyer.set(eye, target, up.clone().applyQuaternion(this.planet.quaternion));
+    this.flyer.set(eye, target, up.clone().applyQuaternion(body.quaternion));
   }
 
-  /** Switches between walking and the free-fly camera, keeping the view where it is. */
+  /**
+   * Switches between walking and the free-fly camera, keeping the view where it is. Walking
+   * needs a body underneath: from open space (outside every sphere of influence) nothing happens.
+   */
   toggleFly(): void {
     if (this.mode === 'walk') {
       const eye = this.player.eyePosition(new THREE.Vector3());
       const orientation = this.player.eyeOrientation(new THREE.Quaternion());
-      this.flyer.placeInFrame(this.planet, eye, orientation);
+      this.flyer.placeInFrame(this.player.planet, eye, orientation);
       this.mode = 'fly';
-    } else {
-      const eye = this.planet.toLocal(this.flyer.universePosition(new THREE.Vector3()));
-      const orientation = orientationToFrame(this.planet, this.flyer.universeOrientation(new THREE.Quaternion()), new THREE.Quaternion());
-      this.player.placeAtEye(eye, new THREE.Vector3(0, 0, -1).applyQuaternion(orientation));
-      this.mode = 'walk';
+      return;
     }
+    const position = this.flyer.universePosition(new THREE.Vector3());
+    const body = this.system.bodyAt(position);
+    if (!body) return;
+    const eye = body.toLocal(position);
+    const orientation = orientationToFrame(body, this.flyer.universeOrientation(new THREE.Quaternion()), new THREE.Quaternion());
+    this.player.placeAtEye(body, eye, new THREE.Vector3(0, 0, -1).applyQuaternion(orientation));
+    this.mode = 'walk';
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -218,29 +227,32 @@ export class Game {
   private update(dt: number): void {
     this.handleKeys();
 
-    // 1. Celestial motion: game time drives the planet's spin.
+    // 1. Celestial motion: game time drives every orbit and spin.
     this.time += dt * this.timeScale;
-    this.planet.updateSpin(this.time);
-    this.star.directionFrom(this.planet.position, this.sunDirection);
+    this.system.update(this.time);
 
     // 2. The active controller, in its reference frame -> the camera's universe pose.
     if (this.mode === 'walk') {
+      const body = this.player.planet;
       this.player.update(dt, this.input);
-      this.planet.toUniverse(this.player.eyePosition(this.cameraPosition), this.cameraPosition);
-      orientationToUniverse(this.planet, this.player.eyeOrientation(this.cameraOrientation), this.cameraOrientation);
+      body.toUniverse(this.player.eyePosition(this.cameraPosition), this.cameraPosition);
+      orientationToUniverse(body, this.player.eyeOrientation(this.cameraOrientation), this.cameraOrientation);
     } else {
       this.updateFreeFly(dt);
       this.flyer.universePosition(this.cameraPosition);
       this.flyer.universeOrientation(this.cameraOrientation);
     }
+    this.currentBody = this.mode === 'walk' ? this.player.planet : this.system.bodyAt(this.cameraPosition);
 
     // 3. The world reacts to where the camera is now.
     this.elapsed += dt;
-    this.planet.ocean.uTime.value = this.elapsed;
-    const daylight = THREE.MathUtils.smoothstep(Math.sin(THREE.MathUtils.degToRad(this.sunElevation())), -0.2, 0.05);
+    for (const body of this.system.bodies) {
+      body.update(this.cameraPosition);
+      body.ocean.uTime.value = this.elapsed;
+    }
+    const daylight = THREE.MathUtils.smoothstep(this.sunHeight(), -0.2, 0.05);
     this.pipeline.exposure = THREE.MathUtils.lerp(NIGHT_EXPOSURE, DAY_EXPOSURE, daylight);
-    this.planet.update(this.cameraPosition, this.sunDirection);
-    this.star.directionFrom(this.cameraPosition, this.sunLight.position);
+    this.system.star.directionFrom(this.cameraPosition, this.sunLight.position);
     this.beacon.update(this.time);
 
     // 4. Last step before rendering: move the universe so the camera sits at the origin.
@@ -249,27 +261,37 @@ export class Game {
     this.updateHud(dt);
   }
 
+  /**
+   * The free camera's frame depends on where it is (its "sphere of influence" logic):
+   *   close to a body   -> the body's rotating frame: hover over the same spot as it spins
+   *   within its SOI    -> the body's inertial frame: follow it around its orbit, no spin
+   *   in open space     -> the universe frame: stay put relative to the star
+   */
+  private freeFlyFrame(position: THREE.Vector3): ReferenceFrame {
+    const body = this.system.bodyAt(position);
+    if (!body) return UNIVERSE_FRAME;
+    const close = position.distanceTo(body.position) < body.radius * ROTATING_FRAME_RADII;
+    return close ? body : body.inertialFrame;
+  }
+
   private updateFreeFly(dt: number): void {
     const flyer = this.flyer;
     const position = flyer.universePosition(new THREE.Vector3());
+    flyer.setFrame(this.freeFlyFrame(position));
 
-    // Close to the planet the camera rides along with its rotation (it hovers over the same
-    // spot while the sun moves); further out it stays put relative to the stars.
-    const nearPlanet = position.distanceTo(this.planet.position) < this.planet.radius * PLANET_FRAME_RADII;
-    flyer.setFrame(nearPlanet ? this.planet : UNIVERSE_FRAME);
-
-    // Level the horizon when low over the planet.
+    // Level the horizon when low over a body.
+    const body = this.system.nearestBody(position);
     let up: THREE.Vector3 | null = null;
-    if (this.planet.altitude(position) < this.planet.radius) {
-      const universeUp = position.clone().sub(this.planet.position).normalize();
+    if (body.altitude(position) < body.radius) {
+      const universeUp = position.clone().sub(body.position).normalize();
       up = directionToFrame(flyer.frame, universeUp, universeUp);
     }
 
     flyer.update(dt, this.input, this.nearestSurfaceDistance(position), up);
 
     // No collision for the free camera, but never let it sink into the ground.
-    if (flyer.frame === this.planet) {
-      const altitude = this.planet.altitudeOfLocal(flyer.position);
+    if (flyer.frame === body) {
+      const altitude = body.altitudeOfLocal(flyer.position);
       if (altitude < 1) flyer.position.addScaledVector(flyer.position.clone().normalize(), 1 - altitude);
     }
   }
@@ -278,13 +300,13 @@ export class Game {
    * Picks the planet's spin phase so that, at time 0, the sun stands `elevationDegrees` above the
    * horizon at `localUp` and is rising: a morning start. Brute force over 720 candidate phases.
    */
-  private chooseStartTime(localUp: THREE.Vector3, elevationDegrees: number): void {
+  private chooseStartTime(body: Planet, localUp: THREE.Vector3, elevationDegrees: number): void {
     const target = Math.sin(THREE.MathUtils.degToRad(elevationDegrees));
     const up = localUp.clone().normalize();
     const sunHeight = (phase: number) => {
-      this.planet.spinPhase = phase;
-      this.planet.updateSpin(0);
-      return up.clone().applyQuaternion(this.planet.quaternion).dot(this.sunDirection);
+      body.spinPhase = phase;
+      body.updateSpin(0);
+      return up.clone().applyQuaternion(body.quaternion).dot(body.sunDirection);
     };
     let best = 0;
     let bestError = Infinity;
@@ -298,20 +320,22 @@ export class Game {
         bestError = error;
       }
     }
-    this.planet.spinPhase = best;
-    this.planet.updateSpin(this.time);
+    body.spinPhase = best;
+    body.updateSpin(this.time);
   }
 
   private render(): void {
     this.renderer.info.reset();
-    this.pipeline.render(this.universe.scene, this.camera);
+    this.pipeline.render(this.universe.scene, this.camera, this.system.bodies.map((body) => body.atmosphere));
   }
 
   private handleKeys(): void {
     const input = this.input;
-    if (input.wasPressed('Digit1')) this.goToOrbit();
-    if (input.wasPressed('Digit2')) this.goToBeacon();
-    if (input.wasPressed('Digit3')) this.respawn();
+    for (let i = 0; i < this.system.bodies.length && i < 9; i++) {
+      if (input.wasPressed(`Digit${i + 1}`)) this.goToBody(this.system.bodies[i]);
+    }
+    if (input.wasPressed('Digit9')) this.goToBeacon();
+    if (input.wasPressed('Digit0')) this.respawn();
     if (input.wasPressed('KeyV')) this.toggleFly();
     if (input.wasPressed('KeyT')) {
       this.timeScale = TIME_SCALES[(TIME_SCALES.indexOf(this.timeScale) + 1) % TIME_SCALES.length];
@@ -320,7 +344,7 @@ export class Game {
     if (input.wasPressed('F3')) this.hud.visible = !this.hud.visible;
     if (input.wasPressed('F4')) {
       this.terrainDebugView = (this.terrainDebugView + 1) % 3;
-      this.planet.setDebugView(this.terrainDebugView);
+      for (const body of this.system.bodies) body.setDebugView(this.terrainDebugView);
     }
     if (input.wasPressed('KeyH')) this.help.classList.toggle('hidden');
   }
@@ -328,8 +352,7 @@ export class Game {
   /** Distance from `p` to the closest thing you could fly into (drives the free-fly speed). */
   private nearestSurfaceDistance(p: THREE.Vector3): number {
     const beaconDistance = p.distanceTo(BEACON_POSITION) - 10;
-    const starDistance = p.distanceTo(STAR_POSITION) - this.star.radius;
-    return Math.max(0, Math.min(this.planet.altitude(p), beaconDistance, starDistance));
+    return Math.max(0, Math.min(this.system.surfaceDistance(p), beaconDistance));
   }
 
   private resize(): void {
@@ -349,27 +372,39 @@ export class Game {
     this.hud.update(dt);
   }
 
-  /** Sun elevation above the horizon at the camera, in degrees. */
-  private sunElevation(): number {
-    const up = this.cameraPosition.clone().sub(this.planet.position).normalize();
-    return THREE.MathUtils.radToDeg(Math.asin(THREE.MathUtils.clamp(up.dot(this.sunDirection), -1, 1)));
+  /**
+   * Sine of the sun's elevation above the horizon at the camera, relative to the body it is at
+   * (-1..1). Out in open space the sun is always "up".
+   */
+  private sunHeight(): number {
+    const body = this.currentBody;
+    if (!body) return 1;
+    const up = this.cameraPosition.clone().sub(body.position).normalize();
+    return up.dot(body.sunDirection);
   }
 
   private debugLines(): string[] {
     const p = this.cameraPosition;
     const info = this.renderer.info.render;
-    const terrain = this.planet.terrain.stats;
-    const elevation = this.sunElevation();
+    const body = this.currentBody ?? this.system.nearestBody(p);
+    const elevation = THREE.MathUtils.radToDeg(Math.asin(THREE.MathUtils.clamp(this.sunHeight(), -1, 1)));
     const player = this.player;
+    const frame = this.mode === 'fly' ? this.flyer.frame.name : `${player.planet.name} (on foot)`;
     const motion = this.mode === 'fly'
-      ? `fly     ${formatSpeed(this.flyer.velocity.length())}  (wheel x${2 ** this.flyer.speedExponent}, frame: ${this.flyer.frame.name})`
+      ? `fly     ${formatSpeed(this.flyer.velocity.length())}  (wheel x${2 ** this.flyer.speedExponent})`
       : `walk    ${formatSpeed(player.speed)}  ${player.swimming ? 'swimming' : player.grounded ? 'on ground' : 'in the air'}, jetpack ${(player.jetpackFuel * 100).toFixed(0)}%`;
+    const stats = { visible: 0, meshes: 0 };
+    for (const b of this.system.bodies) {
+      stats.visible += b.terrain.stats.visible;
+      stats.meshes += b.terrain.stats.meshes;
+    }
     return [
-      `pos     x ${p.x.toFixed(2)}  y ${p.y.toFixed(2)}  z ${p.z.toFixed(2)}`,
-      `planet  ${formatDistance(p.distanceTo(this.planet.position))} from centre, altitude ${formatDistance(this.planet.altitude(p))}`,
+      `pos     x ${p.x.toFixed(0)}  y ${p.y.toFixed(0)}  z ${p.z.toFixed(0)}  (${formatDistance(p.length())} from the star)`,
+      `near    ${body.name}: altitude ${formatDistance(body.altitude(p))}, ${formatDistance(p.distanceTo(body.position))} from centre`,
+      `frame   ${frame}`,
       motion,
       `time    x${this.timeScale}  sun ${elevation >= 0 ? '+' : ''}${elevation.toFixed(0)}° ${elevation > 0 ? 'day' : 'night'}`,
-      `terrain ${terrain.visible} chunks drawn / ${terrain.meshes} built, deepest L${terrain.deepestVisible} of ${this.planet.terrain.maxLevel}`,
+      `terrain ${stats.visible} chunks drawn / ${stats.meshes} built, deepest here L${body.terrain.stats.deepestVisible} of ${body.terrain.maxLevel}`,
       `workers ${this.workers.runningCount} busy, ${this.workers.queuedCount} queued`,
       `gpu     ${info.calls} draws, ${(info.triangles / 1000).toFixed(0)}k tris`,
     ];

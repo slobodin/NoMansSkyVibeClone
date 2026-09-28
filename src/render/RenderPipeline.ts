@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
-import { ATMOSPHERE_GLSL, type AtmosphereUniforms } from './atmosphere';
+import { ATMOSPHERE_GLSL, emptyAtmosphereParams, type AtmosphereParams } from './atmosphere';
 import { VALUE_NOISE_GLSL } from './noiseGlsl';
 import { OCEAN_GLSL, type OceanUniforms } from './ocean';
 
@@ -31,6 +31,9 @@ const vertexShader = /* glsl */ `
   }
 `;
 
+/** How many atmospheres the composite pass can draw at once (one per planet/moon with air). */
+const MAX_ATMOSPHERES = 8;
+
 const fragmentShader = /* glsl */ `
   uniform sampler2D tColor;
   uniform sampler2D tDepth;
@@ -44,6 +47,10 @@ const fragmentShader = /* glsl */ `
   ${ATMOSPHERE_GLSL}
   ${VALUE_NOISE_GLSL}
   ${OCEAN_GLSL}
+
+  // Every atmosphere in the system, sorted far to near (see RenderPipeline.render).
+  uniform Atmosphere uAtmospheres[${MAX_ATMOSPHERES}];
+  uniform int uAtmosphereCount;
 
   // Filmic tone curve (Krzysztof Narkowicz's fit of ACES): compresses HDR into 0..1 with a soft
   // shoulder instead of clipping.
@@ -73,8 +80,9 @@ const fragmentShader = /* glsl */ `
     float sceneDistance = sky ? 1e30 : (exp2(depth * uLogDepthFar) - 1.0) / -viewDir.z;
 
     // 1. The ocean. If the camera itself is under water, fog everything with water instead.
-    bool underwater = uOceanRadius > 0.0 && length(uPlanetCenter) < uOceanRadius;
-    vec2 sea = uOceanRadius > 0.0 ? raySphere(vec3(0.0), dir, uPlanetCenter, uOceanRadius) : vec2(1e30, -1e30);
+    vec3 oceanCenter = uOceanAtmosphere.center;
+    bool underwater = uOceanRadius > 0.0 && length(oceanCenter) < uOceanRadius;
+    vec2 sea = uOceanRadius > 0.0 ? raySphere(vec3(0.0), dir, oceanCenter, uOceanRadius) : vec2(1e30, -1e30);
     if (underwater) {
       color = shadeUnderwater(dir, sea.y, sceneDistance, color);
     } else {
@@ -84,17 +92,26 @@ const fragmentShader = /* glsl */ `
         sky = false;
       }
 
-      // 2. The atmosphere between the camera and whatever the ray hit.
-      vec2 shell = raySphere(vec3(0.0), dir, uPlanetCenter, uAtmosphereRadius);
-      float tStart = max(shell.x, 0.0);
-      float tEnd = min(shell.y, sceneDistance);
-      if (tEnd > tStart) {
+      // 2. The atmospheres between the camera and whatever the ray hit, farthest first: each one
+      //    dims what is behind it and adds its own glow. Stars are kept apart so they can fade
+      //    behind a bright sky, the way eyes and cameras adapt to daylight.
+      vec3 light = sky ? vec3(0.0) : color;
+      vec3 stars = sky ? color : vec3(0.0);
+      vec3 starTransmit = vec3(1.0);
+      for (int i = 0; i < ${MAX_ATMOSPHERES}; i++) {
+        if (i >= uAtmosphereCount) break;
+        Atmosphere a = uAtmospheres[i];
+        vec2 shell = raySphere(vec3(0.0), dir, a.center, a.radius);
+        float tStart = max(shell.x, 0.0);
+        float tEnd = min(shell.y, sceneDistance);
+        if (tEnd <= tStart) continue;
         vec3 transmit;
-        vec3 inscatter = scatterAlongRay(vec3(0.0), dir, tStart, tEnd, 16, transmit);
-        // Stars vanish behind a bright sky, the way eyes and cameras adapt to daylight.
-        if (sky) color *= exp(-40.0 * dot(inscatter, vec3(0.2126, 0.7152, 0.0722)));
-        color = color * transmit + inscatter;
+        vec3 inscatter = scatterAlongRay(a, vec3(0.0), dir, tStart, tEnd, 16, transmit);
+        light = light * transmit + inscatter;
+        starTransmit *= transmit;
       }
+      float skyBrightness = dot(light, vec3(0.2126, 0.7152, 0.0722));
+      color = light + stars * starTransmit * exp(-40.0 * skyBrightness);
     }
 
     // 3. Exposure, filmic tone mapping, sRGB.
@@ -114,11 +131,14 @@ export class RenderPipeline {
   private readonly postScene = new THREE.Scene();
   private readonly postCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
+  /** Placeholder for unused slots of the uAtmospheres array (three.js uploads every slot). */
+  private readonly noAtmosphere: AtmosphereParams;
+
   constructor(
     private readonly renderer: THREE.WebGLRenderer,
-    atmosphere: AtmosphereUniforms,
     ocean: OceanUniforms,
   ) {
+    this.noAtmosphere = emptyAtmosphereParams();
     this.sceneTarget = new THREE.WebGLRenderTarget(1, 1, {
       type: THREE.HalfFloatType, // HDR
       depthTexture: new THREE.DepthTexture(1, 1, THREE.FloatType),
@@ -135,8 +155,9 @@ export class RenderPipeline {
         uCameraRotation: { value: new THREE.Matrix3() },
         uLogDepthFar: { value: 1 },
         uExposure: { value: 1 },
-        // The same uniform objects as the terrain material: both always see the same planet/sun.
-        ...atmosphere,
+        uAtmospheres: { value: new Array<AtmosphereParams>(MAX_ATMOSPHERES).fill(this.noAtmosphere) },
+        uAtmosphereCount: { value: 0 },
+        // The ocean planet's own uniform objects: updated by the planet every frame.
         ...ocean,
       },
       depthTest: false,
@@ -171,19 +192,31 @@ export class RenderPipeline {
     this.fxaa.uniforms.resolution.value.set(1 / width, 1 / height);
   }
 
-  render(scene: THREE.Scene, camera: THREE.PerspectiveCamera): void {
+  /**
+   * @param atmospheres the AtmosphereParams of every body; airless ones are skipped. They are
+   *                    drawn farthest first, which is correct as long as atmospheres don't overlap.
+   */
+  render(scene: THREE.Scene, camera: THREE.PerspectiveCamera, atmospheres: readonly AtmosphereParams[]): void {
     const renderer = this.renderer;
 
     // 1. Scene -> HDR target.
     renderer.setRenderTarget(this.sceneTarget);
     renderer.render(scene, camera);
 
-    // 2. Composite (atmosphere, tone mapping) -> 8-bit target.
+    // 2. Composite (ocean, atmospheres, tone mapping) -> 8-bit target.
     const u = this.composite.uniforms;
     u.uInverseProjection.value.copy(camera.projectionMatrixInverse);
     u.uCameraRotation.value.setFromMatrix4(camera.matrixWorld);
     u.uLogDepthFar.value = Math.log2(camera.far + 1);
     u.uExposure.value = this.exposure;
+    // The camera is at the origin, so |center| is each planet's distance from the camera.
+    const withAir = atmospheres
+      .filter((a) => a.radius > a.planetRadius)
+      .sort((a, b) => b.center.lengthSq() - a.center.lengthSq())
+      .slice(0, MAX_ATMOSPHERES);
+    const slots: AtmosphereParams[] = u.uAtmospheres.value;
+    for (let i = 0; i < MAX_ATMOSPHERES; i++) slots[i] = withAir[i] ?? this.noAtmosphere;
+    u.uAtmosphereCount.value = withAir.length;
     this.quad.material = this.composite;
     renderer.setRenderTarget(this.ldrTarget);
     renderer.render(this.postScene, this.postCamera);

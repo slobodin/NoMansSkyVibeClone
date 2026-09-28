@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ATMOSPHERE_GLSL, type AtmosphereUniforms } from '../render/atmosphere';
+import { ATMOSPHERE_GLSL, type AtmosphereParams } from '../render/atmosphere';
 import { VALUE_NOISE_GLSL } from '../render/noiseGlsl';
 import type { PlanetConfig } from './PlanetConfig';
 
@@ -39,10 +39,11 @@ const vertexShader = /* glsl */ `
 `;
 
 const fragmentShader = /* glsl */ `
-  // uPlanetCenter, uSunDirection, uSunIntensity, sunlightAt(), ... come from here:
+  // The Atmosphere struct, sunlightAt(), skyIrradiance(), ... come from here:
   ${ATMOSPHERE_GLSL}
 
-  uniform mat3 uWorldToPlanet; // rotates world directions into the planet's local frame
+  uniform Atmosphere uAtmosphere; // this planet's air (also its centre and sun direction)
+  uniform mat3 uWorldToPlanet;    // rotates world directions into the planet's local frame
   uniform vec3 uNightLight;    // faint ambient so nights are dark but not black
 
   // Palette (linear RGB) and the snow line in metres.
@@ -88,7 +89,7 @@ const fragmentShader = /* glsl */ `
 
   void main() {
     vec3 normal = normalize(vNormal);
-    vec3 fromCenter = vWorldPosition - uPlanetCenter;
+    vec3 fromCenter = vWorldPosition - uAtmosphere.center;
     vec3 up = normalize(fromCenter);
     vec3 local = uWorldToPlanet * fromCenter;
 
@@ -112,15 +113,11 @@ const fragmentShader = /* glsl */ `
 
     // Direct sunlight, reddened and dimmed by its trip through the atmosphere, and zero where
     // the planet is in the way (night). Lambert: proportional to the cosine of the incidence.
-    vec3 sunlight = sunlightAt(vWorldPosition) * max(dot(normal, uSunDirection), 0.0);
+    vec3 sunlight = sunlightAt(uAtmosphere, vWorldPosition) * max(dot(normal, uAtmosphere.sunDirection), 0.0);
 
-    // Skylight: the sky itself glows blue and lights the ground from all around. A cheap
-    // estimate: the fraction of sunlight the air column overhead scatters (more blue than red),
-    // fading out after sunset; stronger on ground that faces up at the open sky.
-    vec3 zenithScatter = 1.0 - exp(-(uRayleighScattering * uRayleighScaleHeight + uMieScattering * uMieScaleHeight));
-    float daylight = smoothstep(-0.25, 0.3, dot(up, uSunDirection));
+    // Skylight from the whole sky dome, stronger on ground that faces up at the open sky.
     float skyView = 0.5 + 0.5 * dot(normal, up);
-    vec3 skylight = (uSunIntensity * zenithScatter * 0.6 * daylight + uNightLight) * skyView;
+    vec3 skylight = (skyIrradiance(uAtmosphere, up) + uNightLight) * skyView;
 
     // Diffuse surface: outgoing radiance = albedo / pi * incoming irradiance. The output is linear
     // HDR; the composite pass adds the atmosphere in front of it and tone-maps.
@@ -130,7 +127,7 @@ const fragmentShader = /* glsl */ `
   }
 `;
 
-export function createTerrainMaterial(config: PlanetConfig, atmosphere: AtmosphereUniforms): THREE.ShaderMaterial {
+export function createTerrainMaterial(config: PlanetConfig, atmosphere: AtmosphereParams): THREE.ShaderMaterial {
   const c = config.colors;
   // THREE.Color.setHex treats hex as sRGB and converts to linear, which is what lighting needs.
   const color = (hex: number) => ({ value: new THREE.Color().setHex(hex) });
@@ -139,8 +136,8 @@ export function createTerrainMaterial(config: PlanetConfig, atmosphere: Atmosphe
     vertexShader,
     fragmentShader,
     uniforms: {
-      // Shared uniform objects: the composite pass sees the very same values.
-      ...atmosphere,
+      // A struct uniform: the same object the planet updates and the composite pass reads.
+      uAtmosphere: { value: atmosphere },
       uWorldToPlanet: { value: new THREE.Matrix3() },
       uNightLight: { value: new THREE.Vector3(0.1, 0.14, 0.28) },
       uSeabedShallow: color(c.seabedShallow),

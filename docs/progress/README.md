@@ -108,3 +108,37 @@ softening the far hills.
 
 After sunset: the stars come back as the sky darkens, and a simple eye-adaptation raises the
 exposure so the starlit landscape stays readable.
+
+## M3 — Solar system
+
+### 014 — Verdant over Lull
+
+![014](014-m3-verdant-over-lull.jpg)
+
+The whole system now exists: a star, four planets and three moons, all from config. Standing on
+Lull, Verdant's moon: no air, so the sky is black at noon and shadows are hard. Lull is tidally
+locked, so Verdant hangs in the same spot of its sky (bobbing a few degrees because Lull's orbit
+is tilted). Rime and its green moon Sulfa are the two dots above.
+
+### 015 — Ember from orbit
+
+![015](015-m3-ember-from-orbit.jpg)
+
+The innermost planet: red dunes and dark basalt lowlands under an orange sky (stylised: its air
+scatters red most). Every body is the same terrain generator with its own seed, shape
+parameters, palette and air.
+
+### 016 — Sulfa in front of Rime
+
+![016](016-m3-sulfa-in-front-of-rime.jpg)
+
+Several atmospheres at once: the composite pass loops over every body's air, farthest first.
+Sulfa's toxic green haze glows with the sun behind it (Mie scattering is strongly forwards);
+icy Rime is behind.
+
+### 017 — Shard in front of Nyx
+
+![017](017-m3-shard-in-front-of-nyx.jpg)
+
+Nyx's tiny jagged moon against the violet crescent of Nyx. All bodies move on rails: circular
+orbits that are pure functions of time, parents first, then their moons.

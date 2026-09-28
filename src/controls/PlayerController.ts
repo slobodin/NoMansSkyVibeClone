@@ -22,12 +22,12 @@ const LOOK_SENSITIVITY = 0.0022; // radians per pixel
 const MAX_PITCH = THREE.MathUtils.degToRad(89);
 
 /**
- * First-person movement on a round planet.
+ * First-person movement on a round planet (or moon).
  *
- * Everything is in the planet's local frame (it spins with the planet). "Up" is not a constant
- * axis but the direction from the planet centre to the player, re-evaluated every step; gravity
- * pulls along -up, and the look direction (`heading`) is kept perpendicular to up, so walking
- * all the way around the planet just works.
+ * Everything is in the local frame of the body the player is on (`planet`), so the player moves
+ * and spins along with it. "Up" is not a constant axis but the direction from the planet centre to
+ * the player, re-evaluated every step; gravity pulls along -up, and the look direction (`heading`)
+ * is kept perpendicular to up, so walking all the way around the planet just works.
  *
  * Physics runs in fixed steps of PHYSICS_STEP seconds, however long the frame was, which keeps
  * jumps and collisions identical at 30 and 144 FPS.
@@ -65,10 +65,16 @@ export class PlayerController {
   private readonly tmpQuat = new THREE.Quaternion();
   private readonly basis = new THREE.Matrix4();
 
-  constructor(private readonly planet: Planet) {}
+  /** The body the player is on: positions and vectors above are in its local frame. */
+  planet: Planet;
 
-  /** Stands the player on the ground at planet-local direction `dir`, facing `heading`. */
-  spawn(dir: THREE.Vector3, heading: THREE.Vector3): void {
+  constructor(planet: Planet) {
+    this.planet = planet;
+  }
+
+  /** Stands the player on `planet` at local direction `dir`, facing `heading`. */
+  spawn(planet: Planet, dir: THREE.Vector3, heading: THREE.Vector3): void {
+    this.planet = planet;
     const up = this.up.copy(dir).normalize();
     this.position.copy(up).multiplyScalar(this.planet.radius + this.planet.terrainHeight(up));
     this.heading.copy(heading).addScaledVector(up, -heading.dot(up)).normalize();
@@ -77,8 +83,9 @@ export class PlayerController {
     this.grounded = true;
   }
 
-  /** Takes over from another camera: feet under `eye` (planet-local), same view direction. */
-  placeAtEye(eye: THREE.Vector3, forward: THREE.Vector3): void {
+  /** Takes over from another camera: feet under `eye` (local to `planet`), same view direction. */
+  placeAtEye(planet: Planet, eye: THREE.Vector3, forward: THREE.Vector3): void {
+    this.planet = planet;
     const up = this.up.copy(eye).normalize();
     this.position.copy(eye).addScaledVector(up, -EYE_HEIGHT);
     const vertical = forward.dot(up);
@@ -141,7 +148,8 @@ export class PlayerController {
     // Water: the sea surface is the sphere of radius R (sea level = height 0). Start swimming
     // when deeper than the floating depth; stop only once clearly shallower (hysteresis, so the
     // bobbing at the surface does not flip the state every step).
-    const depth = planet.radius - this.position.length(); // how deep the feet are under water
+    // (Dry planets have no water: their lowlands are just ground.)
+    const depth = planet.hasOcean ? planet.radius - this.position.length() : -Infinity;
     if (this.swimming && depth < FLOAT_DEPTH - 0.3) this.swimming = false;
     else if (!this.swimming && depth > FLOAT_DEPTH) this.swimming = true;
 

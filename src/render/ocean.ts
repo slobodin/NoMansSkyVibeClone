@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { PlanetConfig } from '../planet/PlanetConfig';
+import type { AtmosphereParams } from './atmosphere';
 
 /**
  * The ocean, rendered in the composite pass rather than as a mesh.
@@ -14,10 +15,13 @@ import type { PlanetConfig } from '../planet/PlanetConfig';
  * The water colour is refraction (the seabed, dimmed by absorption, plus light scattered back
  * by the water itself) mixed with reflection (the sky, reusing the atmosphere code), weighted by
  * the Fresnel term: little reflection looking straight down, a mirror at grazing angles.
- * Requires ATMOSPHERE_GLSL and VALUE_NOISE_GLSL to be included first.
+ *
+ * One ocean is supported (Verdant's); uOceanAtmosphere is its planet's air, used for the sky it
+ * reflects and the light falling on it. Requires ATMOSPHERE_GLSL and VALUE_NOISE_GLSL first.
  */
 export const OCEAN_GLSL = /* glsl */ `
   uniform float uOceanRadius;    // sea-level radius, 0 = no ocean
+  uniform Atmosphere uOceanAtmosphere;
   uniform vec3 uWaterColor;      // how much light deep water scatters back (an albedo)
   uniform vec3 uWaterAbsorption; // 1/m per RGB channel: red fades first
   uniform mat3 uWorldToPlanet;   // world directions -> planet-local (waves stick to the planet)
@@ -35,7 +39,7 @@ export const OCEAN_GLSL = /* glsl */ `
   vec3 waveNormal(vec3 p, vec3 up, float distance) {
     float fade = 1.0 - smoothstep(100.0, 1500.0, distance);
     if (fade <= 0.0) return up;
-    vec3 local = uWorldToPlanet * (p - uPlanetCenter);
+    vec3 local = uWorldToPlanet * (p - uOceanAtmosphere.center);
     // gradient of height = amplitude * frequency * gradient of noise (chain rule)
     vec3 slope = 0.35 * 0.2 * noiseGradient(local * 0.2 + vec3(uTime * 0.25, 0.0, uTime * 0.15));
     slope += 0.08 * 0.8 * noiseGradient(local * 0.8 + vec3(-uTime * 0.4, uTime * 0.3, 0.0));
@@ -46,23 +50,24 @@ export const OCEAN_GLSL = /* glsl */ `
 
   // The sky as seen from p looking along dir (for reflections): atmosphere scattering only.
   vec3 skyColor(vec3 p, vec3 dir) {
-    float exit = raySphere(p, dir, uPlanetCenter, uAtmosphereRadius).y;
+    Atmosphere a = uOceanAtmosphere;
+    float exit = raySphere(p, dir, a.center, a.radius).y;
     vec3 transmit;
-    return exit > 0.0 ? scatterAlongRay(p, dir, 0.0, exit, 8, transmit) : vec3(0.0);
+    return exit > 0.0 ? scatterAlongRay(a, p, dir, 0.0, exit, 8, transmit) : vec3(0.0);
   }
 
-  // Light arriving at the water: direct sun on a horizontal surface plus a skylight estimate.
+  // Light arriving at the water: direct sun on a horizontal surface plus skylight.
   vec3 lightOnWater(vec3 p, vec3 up) {
-    vec3 zenithScatter = 1.0 - exp(-(uRayleighScattering * uRayleighScaleHeight + uMieScattering * uMieScaleHeight));
-    float daylight = smoothstep(-0.25, 0.3, dot(up, uSunDirection));
-    return sunlightAt(p) * max(dot(up, uSunDirection), 0.0) + uSunIntensity * zenithScatter * 0.6 * daylight;
+    Atmosphere a = uOceanAtmosphere;
+    return sunlightAt(a, p) * max(dot(up, a.sunDirection), 0.0) + skyIrradiance(a, up);
   }
 
   // Colour of the sea surface hit at distance tSurface, with the scene (the seabed) seen through
   // it at sceneDistance with colour sceneColor.
   vec3 shadeOcean(vec3 dir, float tSurface, float sceneDistance, vec3 sceneColor) {
+    Atmosphere a = uOceanAtmosphere;
     vec3 p = dir * tSurface;
-    vec3 up = normalize(p - uPlanetCenter);
+    vec3 up = normalize(p - a.center);
     vec3 normal = waveNormal(p, up, tSurface);
     vec3 light = lightOnWater(p, up);
 
@@ -75,7 +80,7 @@ export const OCEAN_GLSL = /* glsl */ `
     // Reflection of the sky, and the sharp glint of the sun.
     vec3 r = reflect(dir, normal);
     r = normalize(r + up * max(0.0, 0.03 - dot(r, up))); // waves never reflect the seabed
-    vec3 reflection = skyColor(p, r) + sunlightAt(p) * pow(max(dot(r, uSunDirection), 0.0), 500.0) * 3.0;
+    vec3 reflection = skyColor(p, r) + sunlightAt(a, p) * pow(max(dot(r, a.sunDirection), 0.0), 500.0) * 3.0;
 
     // Fresnel (Schlick's approximation): 2% reflection head-on, 100% at grazing angles.
     float fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(-dir, normal), 0.0), 5.0);
@@ -83,14 +88,14 @@ export const OCEAN_GLSL = /* glsl */ `
 
     // Foam where the water is only a few decimetres deep: a broken white line along beaches.
     float depthBelow = waterPath * max(dot(-dir, up), 0.05);
-    vec3 local = uWorldToPlanet * (p - uPlanetCenter);
+    vec3 local = uWorldToPlanet * (p - a.center);
     float foam = (1.0 - smoothstep(0.0, 0.5, depthBelow)) * smoothstep(0.4, 0.7, valueNoise(local * 1.3 + uTime * 0.3));
     return mix(color, light * 0.8 / PI, foam * 0.85);
   }
 
   // Looking around with the camera under water: everything fades into the water colour.
   vec3 shadeUnderwater(vec3 dir, float surfaceDistance, float sceneDistance, vec3 sceneColor) {
-    vec3 up = normalize(-uPlanetCenter);
+    vec3 up = normalize(-uOceanAtmosphere.center);
     vec3 light = lightOnWater(vec3(0.0), up);
     vec3 behind = sceneColor;
     float waterPath = sceneDistance;
@@ -106,10 +111,16 @@ export const OCEAN_GLSL = /* glsl */ `
 
 export type OceanUniforms = ReturnType<typeof createOceanUniforms>;
 
-export function createOceanUniforms(config: PlanetConfig) {
+/**
+ * Uniforms for OCEAN_GLSL, for the planet described by `config` and `atmosphere` (its
+ * AtmosphereParams - the same object the planet updates every frame). A planet without an
+ * ocean gets uOceanRadius = 0, which switches the water off.
+ */
+export function createOceanUniforms(config: PlanetConfig, atmosphere: AtmosphereParams) {
   const ocean = config.ocean;
   return {
     uOceanRadius: { value: ocean ? config.radius : 0 },
+    uOceanAtmosphere: { value: atmosphere },
     uWaterColor: { value: new THREE.Color().setHex(ocean?.color ?? 0x000000) },
     uWaterAbsorption: { value: new THREE.Vector3(...(ocean?.absorption ?? [1, 1, 1])) },
     uWorldToPlanet: { value: new THREE.Matrix3() },
