@@ -7,6 +7,7 @@ const MIN_SPEED = 2; // m/s, so you can still creep along the ground
 const MAX_SPEED = 200_000; // m/s
 const BOOST = 5; // Shift multiplier
 const RESPONSIVENESS = 6; // 1/s, how quickly velocity follows the keys (higher = snappier)
+const LEVELING_RATE = 2; // 1/s, how quickly the horizon is levelled near a planet
 
 /**
  * Debug "spectator" camera with 6 degrees of freedom - the way we get around until the game has
@@ -29,15 +30,26 @@ export class FreeFlyController {
   private readonly tmpEuler = new THREE.Euler();
   private readonly tmpQuat = new THREE.Quaternion();
   private readonly wish = new THREE.Vector3();
+  private readonly forward = new THREE.Vector3();
+  private readonly cameraUp = new THREE.Vector3();
+  private readonly levelUp = new THREE.Vector3();
+  private readonly cross = new THREE.Vector3();
 
-  update(dt: number, input: Input, surfaceDistance: number): void {
+  /**
+   * @param surfaceDistance distance to the nearest surface, sets the speed
+   * @param up local vertical when near a planet: the camera then slowly rolls to keep the
+   *           horizon level (unless you are rolling with Q/E yourself)
+   */
+  update(dt: number, input: Input, surfaceDistance: number, up: THREE.Vector3 | null = null): void {
     // Rotation happens in the camera's own frame (there is no "up" in space). Mouse right = yaw
     // right = negative rotation about the camera's +Y; mouse down = pitch down = negative about +X.
     const yaw = -input.mouseDX * LOOK_SENSITIVITY;
     const pitch = -input.mouseDY * LOOK_SENSITIVITY;
-    const roll = input.axis('KeyE', 'KeyQ') * ROLL_SPEED * dt;
+    const rollInput = input.axis('KeyE', 'KeyQ');
+    const roll = rollInput * ROLL_SPEED * dt;
     this.tmpQuat.setFromEuler(this.tmpEuler.set(pitch, yaw, roll, 'YXZ'));
     this.orientation.multiply(this.tmpQuat).normalize();
+    if (up && rollInput === 0) this.levelHorizon(up, dt);
 
     this.speedExponent = THREE.MathUtils.clamp(this.speedExponent - input.wheelSteps, -6, 8);
 
@@ -58,6 +70,24 @@ export class FreeFlyController {
   /** Current top speed (m/s) for a given distance to the nearest surface. */
   cruiseSpeed(surfaceDistance: number): number {
     return THREE.MathUtils.clamp(surfaceDistance, MIN_SPEED, MAX_SPEED) * 2 ** this.speedExponent;
+  }
+
+  /**
+   * Rolls the camera about its view axis so that its up vector leans towards `up`. We only touch
+   * roll, never where the camera points, so it feels like a gentle auto-pilot for the horizon.
+   */
+  private levelHorizon(up: THREE.Vector3, dt: number): void {
+    const forward = this.forward.set(0, 0, -1).applyQuaternion(this.orientation);
+    const cameraUp = this.cameraUp.set(0, 1, 0).applyQuaternion(this.orientation);
+    // Target: the planet's up, with the part along the view direction removed.
+    const target = this.levelUp.copy(up).addScaledVector(forward, -up.dot(forward));
+    if (target.lengthSq() < 1e-4) return; // looking straight up or down: roll is undefined
+    target.normalize();
+    // Signed angle from cameraUp to target, measured around the forward axis.
+    const angle = Math.atan2(forward.dot(this.cross.crossVectors(cameraUp, target)), cameraUp.dot(target));
+    const step = angle * (1 - Math.exp(-LEVELING_RATE * dt));
+    // A rotation about a world-space axis is applied from the left (premultiply).
+    this.orientation.premultiply(this.tmpQuat.setFromAxisAngle(forward, step)).normalize();
   }
 
   /** Teleports to `eye`, looking at `target`. */

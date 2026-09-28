@@ -8,6 +8,12 @@
  * - Everything "per frame" (mouse delta, wheel, key presses) is accumulated between frames and
  *   cleared by `endFrame()`, which the game loop calls after all systems have read the input.
  */
+
+/** Game keys whose browser default (page scroll, focus change, caret browsing...) we suppress. */
+const SUPPRESSED_BROWSER_KEYS = new Set([
+  'Space', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'F2', 'F3', 'F4', 'F7',
+]);
+
 export class Input {
   /** Mouse movement since the last frame, in pixels. */
   mouseDX = 0;
@@ -21,10 +27,7 @@ export class Input {
 
   constructor(element: HTMLElement) {
     window.addEventListener('keydown', (e) => {
-      // Keep the browser from scrolling the page / moving focus on game keys.
-      if (e.code === 'Space' || e.code === 'Tab' || e.code.startsWith('Arrow') || e.code === 'F2') {
-        e.preventDefault();
-      }
+      if (SUPPRESSED_BROWSER_KEYS.has(e.code)) e.preventDefault();
       if (!e.repeat) this.pressed.add(e.code);
       this.held.add(e.code);
     });
