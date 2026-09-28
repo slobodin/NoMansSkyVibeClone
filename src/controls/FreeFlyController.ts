@@ -1,5 +1,15 @@
 import * as THREE from 'three';
 import type { Input } from '../core/Input';
+import {
+  directionToFrame,
+  directionToUniverse,
+  orientationToFrame,
+  orientationToUniverse,
+  positionToFrame,
+  positionToUniverse,
+  UNIVERSE_FRAME,
+  type ReferenceFrame,
+} from '../core/ReferenceFrame';
 
 const LOOK_SENSITIVITY = 0.0022; // radians per pixel of mouse movement
 const ROLL_SPEED = 1.5; // radians per second (Q / E)
@@ -10,17 +20,19 @@ const RESPONSIVENESS = 6; // 1/s, how quickly velocity follows the keys (higher 
 const LEVELING_RATE = 2; // 1/s, how quickly the horizon is levelled near a planet
 
 /**
- * Debug "spectator" camera with 6 degrees of freedom - the way we get around until the game has
- * a player and a ship.
+ * Debug "spectator" camera with 6 degrees of freedom (V toggles it with walking).
  *
- * Its pose is in universe coordinates (float64 via JS numbers). The game copies the pose into the
- * camera through `Universe.placeCamera` every frame.
+ * Its pose is stored in a reference frame: near a planet that is the planet's rotating frame,
+ * so the camera hovers over the same spot while the planet spins; far away it is the universe.
+ * `setFrame` re-expresses the pose in another frame without moving the camera.
  *
  * Speed is proportional to the distance to the nearest surface: every second covers the same
  * *fraction* of the remaining distance, so crossing 500 km of space and creeping over grass feel
  * the same, and flying straight at a planet approaches it asymptotically instead of crashing.
  */
 export class FreeFlyController {
+  /** The frame that `position`, `orientation` and `velocity` are expressed in. */
+  frame: ReferenceFrame = UNIVERSE_FRAME;
   readonly position = new THREE.Vector3();
   readonly orientation = new THREE.Quaternion();
   readonly velocity = new THREE.Vector3();
@@ -37,8 +49,8 @@ export class FreeFlyController {
 
   /**
    * @param surfaceDistance distance to the nearest surface, sets the speed
-   * @param up local vertical when near a planet: the camera then slowly rolls to keep the
-   *           horizon level (unless you are rolling with Q/E yourself)
+   * @param up local vertical (in this controller's frame) when near a planet: the camera then
+   *           slowly rolls to keep the horizon level (unless you are rolling with Q/E yourself)
    */
   update(dt: number, input: Input, surfaceDistance: number, up: THREE.Vector3 | null = null): void {
     // Rotation happens in the camera's own frame (there is no "up" in space). Mouse right = yaw
@@ -73,6 +85,37 @@ export class FreeFlyController {
   }
 
   /**
+   * Switches to another reference frame, keeping the camera where it is. (The velocity is only
+   * rotated: for a debug camera we deliberately ignore the frame's own motion.)
+   */
+  setFrame(frame: ReferenceFrame): void {
+    if (frame === this.frame) return;
+    const position = positionToUniverse(this.frame, this.position, new THREE.Vector3());
+    const orientation = orientationToUniverse(this.frame, this.orientation, new THREE.Quaternion());
+    const velocity = directionToUniverse(this.frame, this.velocity, new THREE.Vector3());
+    this.frame = frame;
+    positionToFrame(frame, position, this.position);
+    orientationToFrame(frame, orientation, this.orientation);
+    directionToFrame(frame, velocity, this.velocity);
+  }
+
+  universePosition(out: THREE.Vector3): THREE.Vector3 {
+    return positionToUniverse(this.frame, this.position, out);
+  }
+
+  universeOrientation(out: THREE.Quaternion): THREE.Quaternion {
+    return orientationToUniverse(this.frame, this.orientation, out);
+  }
+
+  /** Teleports to universe position `eye`, looking at universe position `target`. */
+  set(eye: THREE.Vector3, target: THREE.Vector3, up = new THREE.Vector3(0, 1, 0)): void {
+    const orientation = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().lookAt(eye, target, up));
+    positionToFrame(this.frame, eye, this.position);
+    orientationToFrame(this.frame, orientation, this.orientation);
+    this.velocity.set(0, 0, 0);
+  }
+
+  /**
    * Rolls the camera about its view axis so that its up vector leans towards `up`. We only touch
    * roll, never where the camera points, so it feels like a gentle auto-pilot for the horizon.
    */
@@ -86,14 +129,7 @@ export class FreeFlyController {
     // Signed angle from cameraUp to target, measured around the forward axis.
     const angle = Math.atan2(forward.dot(this.cross.crossVectors(cameraUp, target)), cameraUp.dot(target));
     const step = angle * (1 - Math.exp(-LEVELING_RATE * dt));
-    // A rotation about a world-space axis is applied from the left (premultiply).
+    // A rotation about a direction in our frame is applied from the left (premultiply).
     this.orientation.premultiply(this.tmpQuat.setFromAxisAngle(forward, step)).normalize();
-  }
-
-  /** Teleports to `eye`, looking at `target`. */
-  set(eye: THREE.Vector3, target: THREE.Vector3, up = new THREE.Vector3(0, 1, 0)): void {
-    this.position.copy(eye);
-    this.orientation.setFromRotationMatrix(new THREE.Matrix4().lookAt(eye, target, up));
-    this.velocity.set(0, 0, 0);
   }
 }

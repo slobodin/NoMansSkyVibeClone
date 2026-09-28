@@ -10,6 +10,9 @@ export const VERDANT: PlanetConfig = {
   name: 'Verdant',
   seed: 20260928,
   radius: 10_000,
+  rotationPeriod: 15 * 60, // a 15 minute day
+  axialTilt: (18 * Math.PI) / 180,
+  gravity: 9.81,
   terrain: {
     warpScale: 5000,
     warpAmount: 2500,

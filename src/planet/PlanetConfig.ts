@@ -7,6 +7,12 @@ export interface PlanetConfig {
   seed: number;
   /** Sea-level (reference) radius in metres. Terrain heights are relative to it. */
   radius: number;
+  /** Time for one full turn about the spin axis (the planet's local +Y), in seconds. */
+  rotationPeriod: number;
+  /** Tilt of the spin axis, in radians. */
+  axialTilt: number;
+  /** Surface gravity in m/s^2 (a game parameter, not derived from mass). */
+  gravity: number;
   terrain: TerrainShapeConfig;
   colors: TerrainColorConfig;
 }
