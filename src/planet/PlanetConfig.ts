@@ -15,6 +15,38 @@ export interface PlanetConfig {
   gravity: number;
   terrain: TerrainShapeConfig;
   colors: TerrainColorConfig;
+  atmosphere: AtmosphereConfig;
+  /** Water filling everything below sea level (render/ocean.ts); absent = dry planet. */
+  ocean?: OceanConfig;
+}
+
+export interface OceanConfig {
+  /** Colour of the light deep water scatters back (sRGB hex). */
+  color: number;
+  /** How fast light fades per metre of water, RGB. Red is absorbed first. */
+  absorption: [number, number, number];
+}
+
+/**
+ * Physical parameters for single-scattering atmosphere rendering (see render/atmosphere.ts).
+ * Values are per metre, scaled up from Earth's so that a thin shell over a 10 km planet looks
+ * as blue as Earth's 100 km of air: what matters visually is the optical depth, i.e.
+ * scattering coefficient x scale height.
+ */
+export interface AtmosphereConfig {
+  /** Top of the atmosphere, metres above sea level. */
+  height: number;
+  /** Rayleigh (air molecule) scattering at sea level, 1/m per RGB channel: blue scatters most. */
+  rayleighScattering: [number, number, number];
+  /** Height over which the Rayleigh density falls by a factor of e. */
+  rayleighScaleHeight: number;
+  /** Mie (haze, dust) scattering at sea level, 1/m, the same for all colours. */
+  mieScattering: number;
+  mieScaleHeight: number;
+  /** Mie anisotropy g: 0 scatters evenly, close to 1 mostly forwards (the glow around the sun). */
+  mieAnisotropy: number;
+  /** Ozone-like absorption at sea level, 1/m per RGB channel (absorbs light, scatters none). */
+  absorption: [number, number, number];
 }
 
 /**

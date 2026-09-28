@@ -63,3 +63,34 @@ Walking on the planet: spherical gravity, walk / sprint / jump / jetpack, swimmi
 terrain collision against the same height function the workers used to build the mesh. The
 planet now spins (15-minute day) around a real star 180 km away, so the sun rises and sets. The
 sky is still black: the atmosphere is next.
+
+### 008 — Sky and sea at the spawn point
+
+![008](008-m2-sky-and-sea-at-the-spawn.jpg)
+
+Atmospheric scattering: a full-screen pass ray-marches Rayleigh + Mie single scattering for
+every pixel, using the depth buffer to know how far the terrain is — so one piece of code gives
+the blue sky, the glow around the sun and the haze that fades the distant mountains. The ocean
+lives in the same pass: an exact sea-level sphere intersected per pixel.
+
+### 009 — Shallow water at the beach
+
+![009](009-m2-shallow-water-at-the-beach.jpg)
+
+Because the seabed is still in the depth buffer, the shader knows how much water light crosses:
+red is absorbed first, so shallow water over sand is turquoise and deep water dark blue.
+Reflections of the sky (Fresnel), a sun glint, animated noise waves and foam in the shallows.
+
+### 010 — Sunset over the sea
+
+![010](010-m2-sunset-over-the-sea.jpg)
+
+Sunlight reaching the air and the ground has crossed the atmosphere too, so it reddens near the
+horizon. An ozone-like absorption term keeps sunsets peach/orange instead of yellow-green.
+
+### 011 — Verdant from orbit, day and night
+
+![011](011-m2-verdant-from-orbit-day-and-night.jpg)
+
+The same shaders seen from space: a glowing rim, a soft terminator (the planet's shadow fades
+over a few degrees), oceans, and a night side lit only by starlight.

@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { ATMOSPHERE_GLSL, type AtmosphereUniforms } from '../render/atmosphere';
+import { VALUE_NOISE_GLSL } from '../render/noiseGlsl';
 import type { PlanetConfig } from './PlanetConfig';
 
 /**
@@ -37,11 +39,11 @@ const vertexShader = /* glsl */ `
 `;
 
 const fragmentShader = /* glsl */ `
-  uniform vec3 uSunDirection; // unit vector towards the sun
-  uniform vec3 uSunColor;
-  uniform vec3 uAmbientColor;
-  uniform vec3 uPlanetCenter; // world space
+  // uPlanetCenter, uSunDirection, uSunIntensity, sunlightAt(), ... come from here:
+  ${ATMOSPHERE_GLSL}
+
   uniform mat3 uWorldToPlanet; // rotates world directions into the planet's local frame
+  uniform vec3 uNightLight;    // faint ambient so nights are dark but not black
 
   // Palette (linear RGB) and the snow line in metres.
   uniform vec3 uSeabedShallow;
@@ -61,22 +63,7 @@ const fragmentShader = /* glsl */ `
 
   #include <logdepthbuf_pars_fragment>
 
-  // Cheap value noise for close-up texture ("hash without sine" by Dave Hoskins, MIT).
-  float hash(vec3 p) {
-    p = fract(p * 0.1031);
-    p += dot(p, p.zyx + 31.32);
-    return fract((p.x + p.y) * p.z);
-  }
-
-  float valueNoise(vec3 p) {
-    vec3 i = floor(p);
-    vec3 f = fract(p);
-    vec3 u = f * f * (3.0 - 2.0 * f);
-    return mix(
-      mix(mix(hash(i), hash(i + vec3(1, 0, 0)), u.x), mix(hash(i + vec3(0, 1, 0)), hash(i + vec3(1, 1, 0)), u.x), u.y),
-      mix(mix(hash(i + vec3(0, 0, 1)), hash(i + vec3(1, 0, 1)), u.x), mix(hash(i + vec3(0, 1, 1)), hash(i + vec3(1, 1, 1)), u.x), u.y),
-      u.z);
-  }
+  ${VALUE_NOISE_GLSL}
 
   // height: metres above sea level; slope: 0 flat .. 1 vertical; polar: |sin(latitude)|
   vec3 surfaceColor(float height, float slope, float polar, float variation) {
@@ -123,23 +110,27 @@ const fragmentShader = /* glsl */ `
     detail += (valueNoise(local * 6.0) - 0.5) * 0.3 * (1.0 - smoothstep(15.0, 50.0, distance));
     albedo *= 1.0 + detail;
 
-    // Lambert diffuse from the sun, but only on the day side: past the terminator the planet
-    // itself is in the way (without this, slopes facing the sun would glow in the night).
-    float diffuse = max(dot(normal, uSunDirection), 0.0);
-    float daySide = smoothstep(-0.05, 0.08, dot(up, uSunDirection));
-    // Ambient light from the sky, a bit stronger on ground that faces up.
-    float skyView = 0.6 + 0.4 * dot(normal, up);
+    // Direct sunlight, reddened and dimmed by its trip through the atmosphere, and zero where
+    // the planet is in the way (night). Lambert: proportional to the cosine of the incidence.
+    vec3 sunlight = sunlightAt(vWorldPosition) * max(dot(normal, uSunDirection), 0.0);
 
-    vec3 light = uSunColor * diffuse * daySide + uAmbientColor * skyView;
-    gl_FragColor = vec4(albedo * light, 1.0);
+    // Skylight: the sky itself glows blue and lights the ground from all around. A cheap
+    // estimate: the fraction of sunlight the air column overhead scatters (more blue than red),
+    // fading out after sunset; stronger on ground that faces up at the open sky.
+    vec3 zenithScatter = 1.0 - exp(-(uRayleighScattering * uRayleighScaleHeight + uMieScattering * uMieScaleHeight));
+    float daylight = smoothstep(-0.25, 0.3, dot(up, uSunDirection));
+    float skyView = 0.5 + 0.5 * dot(normal, up);
+    vec3 skylight = (uSunIntensity * zenithScatter * 0.6 * daylight + uNightLight) * skyView;
+
+    // Diffuse surface: outgoing radiance = albedo / pi * incoming irradiance. The output is linear
+    // HDR; the composite pass adds the atmosphere in front of it and tone-maps.
+    gl_FragColor = vec4(albedo / PI * (sunlight + skylight), 1.0);
 
     #include <logdepthbuf_fragment>
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
   }
 `;
 
-export function createTerrainMaterial(config: PlanetConfig): THREE.ShaderMaterial {
+export function createTerrainMaterial(config: PlanetConfig, atmosphere: AtmosphereUniforms): THREE.ShaderMaterial {
   const c = config.colors;
   // THREE.Color.setHex treats hex as sRGB and converts to linear, which is what lighting needs.
   const color = (hex: number) => ({ value: new THREE.Color().setHex(hex) });
@@ -148,11 +139,10 @@ export function createTerrainMaterial(config: PlanetConfig): THREE.ShaderMateria
     vertexShader,
     fragmentShader,
     uniforms: {
-      uSunDirection: { value: new THREE.Vector3(1, 0, 0) },
-      uSunColor: { value: new THREE.Color(1.0, 0.95, 0.88).multiplyScalar(2.3) },
-      uAmbientColor: { value: new THREE.Color(0.1, 0.12, 0.16) },
-      uPlanetCenter: { value: new THREE.Vector3() },
+      // Shared uniform objects: the composite pass sees the very same values.
+      ...atmosphere,
       uWorldToPlanet: { value: new THREE.Matrix3() },
+      uNightLight: { value: new THREE.Vector3(0.1, 0.14, 0.28) },
       uSeabedShallow: color(c.seabedShallow),
       uSeabedDeep: color(c.seabedDeep),
       uBeach: color(c.beach),

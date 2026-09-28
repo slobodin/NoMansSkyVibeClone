@@ -32,11 +32,26 @@ export const VERDANT: PlanetConfig = {
     seabedShallow: 0xc9b98a,
     seabedDeep: 0x3a5550,
     beach: 0xe0d09a,
-    grassLush: 0x427f2e,
-    grassDry: 0x8f9a52,
+    grassLush: 0x3f7030,
+    grassDry: 0x857f4c,
     forest: 0x2b5427,
     rock: 0x6e6457,
     snow: 0xf2f6fa,
     snowLine: 550,
+  },
+  atmosphere: {
+    height: 2400,
+    // Earth's sea-level Rayleigh coefficients (5.8, 13.5, 33.1) x 1e-6 scaled by 20: Earth's scale
+    // height is 8 km, ours 450 m, so this keeps a similar vertical optical depth (a blue sky).
+    rayleighScattering: [1.16e-4, 2.7e-4, 6.62e-4],
+    rayleighScaleHeight: 450,
+    mieScattering: 1.2e-4,
+    mieScaleHeight: 120,
+    mieAnisotropy: 0.85,
+    absorption: [5.2e-5, 1.52e-4, 6.8e-6],
+  },
+  ocean: {
+    color: 0x0f5d7a,
+    absorption: [0.3, 0.07, 0.045],
   },
 };

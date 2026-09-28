@@ -50,8 +50,6 @@ const fragmentShader = /* glsl */ `
     gl_FragColor = vec4(vColor * falloff * uBrightness, 1.0);
 
     #include <logdepthbuf_fragment>
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
   }
 `;
 

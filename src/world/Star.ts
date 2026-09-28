@@ -7,6 +7,8 @@ import * as THREE from 'three';
  */
 export class Star {
   readonly object = new THREE.Group();
+  /** Sunlight (irradiance, linear RGB) above any atmosphere - what the shaders light with. */
+  readonly intensity: THREE.Vector3;
 
   constructor(
     readonly name: string,
@@ -16,6 +18,7 @@ export class Star {
   ) {
     this.object.name = name;
     this.object.position.copy(position);
+    this.intensity = new THREE.Vector3(color.r, color.g, color.b).multiplyScalar(20);
 
     const sphere = new THREE.Mesh(
       new THREE.SphereGeometry(radius, 48, 24),

@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { positionToFrame, positionToUniverse, type ReferenceFrame } from '../core/ReferenceFrame';
+import { createAtmosphereUniforms, type AtmosphereUniforms } from '../render/atmosphere';
+import { createOceanUniforms, type OceanUniforms } from '../render/ocean';
 import type { ChunkWorkerPool } from './ChunkWorkerPool';
 import type { PlanetConfig } from './PlanetConfig';
 import { Terrain } from './Terrain';
@@ -23,6 +25,10 @@ export class Planet implements ReferenceFrame {
   readonly generator: TerrainGenerator;
   readonly terrain: Terrain;
   readonly material: THREE.ShaderMaterial;
+  /** Shader uniforms describing this planet's atmosphere, shared by the terrain and the sky. */
+  readonly atmosphere: AtmosphereUniforms;
+  /** Shader uniforms for the ocean (drawn by the composite pass). */
+  readonly ocean: OceanUniforms;
   /** Spin angle at time 0 (radians). Chosen at start-up to pick the time of day. */
   spinPhase = 0;
 
@@ -35,12 +41,15 @@ export class Planet implements ReferenceFrame {
     readonly config: PlanetConfig,
     position: THREE.Vector3,
     pool: ChunkWorkerPool,
+    sunIntensity: THREE.Vector3,
   ) {
     this.group.name = config.name;
     this.group.position.copy(position);
     this.tilt = new THREE.Quaternion().setFromAxisAngle(X_AXIS, config.axialTilt);
     this.generator = new TerrainGenerator(config);
-    this.material = createTerrainMaterial(config);
+    this.atmosphere = createAtmosphereUniforms(config, sunIntensity);
+    this.ocean = createOceanUniforms(config);
+    this.material = createTerrainMaterial(config, this.atmosphere);
     this.terrain = new Terrain(config, pool, this.material);
     this.group.add(this.terrain.group);
   }
@@ -108,12 +117,13 @@ export class Planet implements ReferenceFrame {
   /** Once per frame, after updateSpin: stream terrain around the camera, refresh uniforms. */
   update(cameraPosition: THREE.Vector3, sunDirection: THREE.Vector3): void {
     this.terrain.update(this.toLocal(cameraPosition, this.tmp));
-    const uniforms = this.material.uniforms;
-    uniforms.uSunDirection.value.copy(sunDirection);
+    this.atmosphere.uSunDirection.value.copy(sunDirection);
     // World space is camera-relative, so the centre in world space is position - camera.
-    uniforms.uPlanetCenter.value.copy(this.group.position).sub(cameraPosition);
+    this.atmosphere.uPlanetCenter.value.copy(this.group.position).sub(cameraPosition);
+    const uniforms = this.material.uniforms;
     // The inverse of a rotation matrix is its transpose.
     this.rotation.makeRotationFromQuaternion(this.group.quaternion);
     uniforms.uWorldToPlanet.value.setFromMatrix4(this.rotation).transpose();
+    this.ocean.uWorldToPlanet.value.copy(uniforms.uWorldToPlanet.value);
   }
 }

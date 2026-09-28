@@ -7,6 +7,7 @@ import { Universe } from './core/Universe';
 import { saveScreenshot } from './dev/DevTools';
 import { ChunkWorkerPool } from './planet/ChunkWorkerPool';
 import { Planet } from './planet/Planet';
+import { RenderPipeline } from './render/RenderPipeline';
 import { createStarfield } from './render/Starfield';
 import { DebugHud, formatDistance, formatSpeed } from './ui/DebugHud';
 import { VERDANT } from './world/bodies';
@@ -31,6 +32,9 @@ const START_SUN_ELEVATION = 25;
 const PLANET_FRAME_RADII = 3;
 /** T cycles through these game-time multipliers (the day/night cycle speeds up). */
 const TIME_SCALES = [1, 10, 60, 300];
+/** Exposure by day and by night: a crude stand-in for the eye adapting to the dark. */
+const DAY_EXPOSURE = 0.75;
+const NIGHT_EXPOSURE = 3;
 
 const HELP = `mouse    look (click to capture, Esc to release)
 W A S D  move          Shift  sprint
@@ -58,6 +62,7 @@ export class Game {
   readonly star: Star;
   readonly planet: Planet;
   readonly player: PlayerController;
+  readonly pipeline: RenderPipeline;
   readonly flyer = new FreeFlyController();
   /** Which controller drives the camera: walking on the planet, or the free-fly debug camera. */
   mode: Mode = 'walk';
@@ -67,6 +72,8 @@ export class Game {
   /** Game time in seconds (runs `timeScale` times faster than real time). */
   time = 0;
   timeScale = 1;
+  /** Real seconds since start (not scaled by timeScale): animates things like waves. */
+  elapsed = 0;
 
   /** The camera's universe pose this frame. */
   readonly cameraPosition = new THREE.Vector3();
@@ -82,9 +89,11 @@ export class Game {
   private readonly jetpackFill = document.getElementById('jetpack-fill')!;
 
   constructor(container: HTMLElement) {
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+    // No canvas antialiasing: the scene is drawn into a multisampled target (RenderPipeline.ts).
+    this.renderer = new THREE.WebGLRenderer({ antialias: false, logarithmicDepthBuffer: true });
     this.renderer.setPixelRatio(1); // perf target is a weak integrated GPU, see PLAN.md
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    // A frame is several render() calls (scene + post passes): count them all for the HUD.
+    this.renderer.info.autoReset = false;
     container.prepend(this.renderer.domElement);
 
     this.input = new Input(container);
@@ -105,8 +114,9 @@ export class Game {
     this.sunLight = new THREE.DirectionalLight(0xfff4e0, 3);
     this.universe.scene.add(this.sunLight, new THREE.AmbientLight(0x404a66, 0.6));
 
-    this.planet = new Planet(VERDANT, PLANET_POSITION, this.workers);
+    this.planet = new Planet(VERDANT, PLANET_POSITION, this.workers, this.star.intensity);
     this.universe.root.add(this.planet.group);
+    this.pipeline = new RenderPipeline(this.renderer, this.planet.atmosphere, this.planet.ocean);
     this.star.directionFrom(this.planet.position, this.sunDirection);
 
     this.beacon = new TestBeacon(BEACON_POSITION);
@@ -225,6 +235,10 @@ export class Game {
     }
 
     // 3. The world reacts to where the camera is now.
+    this.elapsed += dt;
+    this.planet.ocean.uTime.value = this.elapsed;
+    const daylight = THREE.MathUtils.smoothstep(Math.sin(THREE.MathUtils.degToRad(this.sunElevation())), -0.2, 0.05);
+    this.pipeline.exposure = THREE.MathUtils.lerp(NIGHT_EXPOSURE, DAY_EXPOSURE, daylight);
     this.planet.update(this.cameraPosition, this.sunDirection);
     this.star.directionFrom(this.cameraPosition, this.sunLight.position);
     this.beacon.update(this.time);
@@ -289,7 +303,8 @@ export class Game {
   }
 
   private render(): void {
-    this.renderer.render(this.universe.scene, this.camera);
+    this.renderer.info.reset();
+    this.pipeline.render(this.universe.scene, this.camera);
   }
 
   private handleKeys(): void {
@@ -322,6 +337,7 @@ export class Game {
     const width = canvas.parentElement!.clientWidth;
     const height = canvas.parentElement!.clientHeight;
     this.renderer.setSize(width, height, false);
+    this.pipeline.setSize(width, height);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
   }
