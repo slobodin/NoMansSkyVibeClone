@@ -75,6 +75,26 @@ body {
   border-radius: 4px;
 }
 
+/* Jetpack fuel, bottom centre. */
+#jetpack {
+  position: absolute;
+  left: 50%;
+  bottom: 28px;
+  width: 180px;
+  height: 6px;
+  margin-left: -90px;
+  background: rgb(0 0 0 / 0.4);
+  border: 1px solid rgb(255 255 255 / 0.35);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+#jetpack-fill {
+  height: 100%;
+  width: 100%;
+  background: linear-gradient(90deg, #ffb347, #ffe29a);
+}
+
 .hidden {
   display: none;
 }

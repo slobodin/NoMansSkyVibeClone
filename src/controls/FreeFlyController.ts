@@ -107,6 +107,14 @@ export class FreeFlyController {
     return orientationToUniverse(this.frame, this.orientation, out);
   }
 
+  /** Takes over a pose given directly in `frame` coordinates (e.g. the player's eye). */
+  placeInFrame(frame: ReferenceFrame, position: THREE.Vector3, orientation: THREE.Quaternion): void {
+    this.frame = frame;
+    this.position.copy(position);
+    this.orientation.copy(orientation);
+    this.velocity.set(0, 0, 0);
+  }
+
   /** Teleports to universe position `eye`, looking at universe position `target`. */
   set(eye: THREE.Vector3, target: THREE.Vector3, up = new THREE.Vector3(0, 1, 0)): void {
     const orientation = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().lookAt(eye, target, up));

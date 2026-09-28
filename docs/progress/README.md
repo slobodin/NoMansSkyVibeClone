@@ -52,3 +52,14 @@ cracks.
 
 At ground level the finest chunks have ~1 m vertex spacing, and a few octaves of value noise in
 the shader give the ground some texture (faded out with distance so it never shimmers).
+
+## M2 — On foot
+
+### 007 — First person at the spawn point
+
+![007](007-m2-on-foot-at-the-spawn-point.jpg)
+
+Walking on the planet: spherical gravity, walk / sprint / jump / jetpack, swimming, and analytic
+terrain collision against the same height function the workers used to build the mesh. The
+planet now spins (15-minute day) around a real star 180 km away, so the sun rises and sets. The
+sky is still black: the atmosphere is next.

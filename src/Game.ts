@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { FreeFlyController } from './controls/FreeFlyController';
+import { PlayerController } from './controls/PlayerController';
 import { Input } from './core/Input';
-import { directionToFrame, UNIVERSE_FRAME } from './core/ReferenceFrame';
+import { directionToFrame, orientationToFrame, orientationToUniverse, UNIVERSE_FRAME } from './core/ReferenceFrame';
 import { Universe } from './core/Universe';
 import { saveScreenshot } from './dev/DevTools';
 import { ChunkWorkerPool } from './planet/ChunkWorkerPool';
@@ -21,34 +22,45 @@ const STAR_POSITION = new THREE.Vector3(0, 0, 0);
 const PLANET_POSITION = new THREE.Vector3(-1, -0.35, -0.55).setLength(180_000);
 /** The jitter test from M0: a small structure 500 km from the planet. */
 const BEACON_POSITION = PLANET_POSITION.clone().add(new THREE.Vector3(500_000, 0, 0));
+/** Where the player starts: planet-local direction and facing - flat ground in a valley by a bay. */
+const SPAWN_DIRECTION = new THREE.Vector3(-0.1205, -0.0173, 0.9926);
+const SPAWN_HEADING = new THREE.Vector3(0.9927, 0, 0.1205);
+/** Sun elevation (degrees, rising) at the spawn point when the game starts. */
+const START_SUN_ELEVATION = 25;
 /** Within this many planet radii the free camera rides along with the planet's rotation. */
 const PLANET_FRAME_RADII = 3;
 /** T cycles through these game-time multipliers (the day/night cycle speeds up). */
 const TIME_SCALES = [1, 10, 60, 300];
 
 const HELP = `mouse    look (click to capture, Esc to release)
-W A S D  move        Space / C  up / down
-Q / E    roll        Shift      boost
-wheel    speed x2 / x0.5
-T  time speed x1 / x10 / x60 / x300
-1  orbit   2  test beacon (500 km out)   3  surface
+W A S D  move          Shift  sprint
+Space    jump, hold for jetpack (swim up in water)
+C        dive (in water)
+V        toggle free-fly camera (Space/C up/down, Q/E roll, wheel speed)
+T        time speed x1 / x10 / x60 / x300
+1  orbit   2  test beacon (500 km out)   3  respawn on foot
 F2 screenshot   F3 debug panel   F4 terrain LOD view   H help`;
+
+type Mode = 'walk' | 'fly';
 
 /**
  * Owns the renderer, the scene and all systems, and runs the frame loop:
  *
- *   frame: dt -> update(dt) [time -> planet spin -> controllers -> world] -> placeCamera -> render
+ *   frame: dt -> update(dt) [time -> planet spin -> controller -> world] -> placeCamera -> render
  */
 export class Game {
   readonly renderer: THREE.WebGLRenderer;
   readonly camera = new THREE.PerspectiveCamera(FOV, 1, NEAR, FAR);
   readonly universe = new Universe();
   readonly input: Input;
-  readonly flyer = new FreeFlyController();
   readonly hud: DebugHud;
   readonly workers: ChunkWorkerPool;
   readonly star: Star;
   readonly planet: Planet;
+  readonly player: PlayerController;
+  readonly flyer = new FreeFlyController();
+  /** Which controller drives the camera: walking on the planet, or the free-fly debug camera. */
+  mode: Mode = 'walk';
   /** Unit vector from the planet towards the sun, universe axes. */
   readonly sunDirection = new THREE.Vector3();
 
@@ -57,8 +69,8 @@ export class Game {
   timeScale = 1;
 
   /** The camera's universe pose this frame. */
-  private readonly cameraPosition = new THREE.Vector3();
-  private readonly cameraOrientation = new THREE.Quaternion();
+  readonly cameraPosition = new THREE.Vector3();
+  readonly cameraOrientation = new THREE.Quaternion();
 
   private lastFrameMs = performance.now();
   private terrainDebugView = 0;
@@ -66,6 +78,8 @@ export class Game {
   private readonly beacon: TestBeacon;
   private readonly clickToPlay = document.getElementById('click-to-play')!;
   private readonly help = document.getElementById('help')!;
+  private readonly jetpackBar = document.getElementById('jetpack')!;
+  private readonly jetpackFill = document.getElementById('jetpack-fill')!;
 
   constructor(container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
@@ -93,12 +107,14 @@ export class Game {
 
     this.planet = new Planet(VERDANT, PLANET_POSITION, this.workers);
     this.universe.root.add(this.planet.group);
+    this.star.directionFrom(this.planet.position, this.sunDirection);
 
     this.beacon = new TestBeacon(BEACON_POSITION);
     this.universe.root.add(this.beacon.object);
 
-    this.planet.updateSpin(this.time);
-    this.goToOrbit();
+    this.player = new PlayerController(this.planet);
+    this.chooseStartTime(SPAWN_DIRECTION, START_SUN_ELEVATION);
+    this.respawn();
 
     window.addEventListener('resize', () => this.resize());
     this.resize();
@@ -123,19 +139,26 @@ export class Game {
 
   // --- Teleports ----------------------------------------------------------------------------------
 
+  respawn(): void {
+    this.mode = 'walk';
+    this.player.spawn(SPAWN_DIRECTION, SPAWN_HEADING);
+  }
+
   goToOrbit(): void {
     // On the sunlit side, a little off the planet-sun line.
     const eye = new THREE.Vector3(0.2, 0.35, 0.92).setLength(32_000).add(this.planet.position);
+    this.mode = 'fly';
     this.flyer.set(eye, this.planet.position);
   }
 
   goToBeacon(): void {
     const eye = BEACON_POSITION.clone().add(new THREE.Vector3(6, 2.5, 9));
+    this.mode = 'fly';
     this.flyer.set(eye, BEACON_POSITION.clone().add(new THREE.Vector3(1, 0.5, -1)));
   }
 
   /**
-   * Puts the camera `height` metres above the ground at planet-local direction `dir`, looking
+   * Free-fly camera `height` metres above the ground at planet-local direction `dir`, looking
    * horizontally towards `heading` (planet-local; its vertical part is ignored).
    */
   goToSurface(dir: THREE.Vector3, height: number, heading: THREE.Vector3, pitchDegrees = -8): void {
@@ -147,7 +170,23 @@ export class Game {
     forward.applyAxisAngle(right, THREE.MathUtils.degToRad(pitchDegrees));
     const eye = this.planet.toUniverse(eyeLocal);
     const target = this.planet.toUniverse(eyeLocal.clone().add(forward));
+    this.mode = 'fly';
     this.flyer.set(eye, target, up.clone().applyQuaternion(this.planet.quaternion));
+  }
+
+  /** Switches between walking and the free-fly camera, keeping the view where it is. */
+  toggleFly(): void {
+    if (this.mode === 'walk') {
+      const eye = this.player.eyePosition(new THREE.Vector3());
+      const orientation = this.player.eyeOrientation(new THREE.Quaternion());
+      this.flyer.placeInFrame(this.planet, eye, orientation);
+      this.mode = 'fly';
+    } else {
+      const eye = this.planet.toLocal(this.flyer.universePosition(new THREE.Vector3()));
+      const orientation = orientationToFrame(this.planet, this.flyer.universeOrientation(new THREE.Quaternion()), new THREE.Quaternion());
+      this.player.placeAtEye(eye, new THREE.Vector3(0, 0, -1).applyQuaternion(orientation));
+      this.mode = 'walk';
+    }
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -174,10 +213,16 @@ export class Game {
     this.planet.updateSpin(this.time);
     this.star.directionFrom(this.planet.position, this.sunDirection);
 
-    // 2. Controllers, in their reference frames.
-    this.updateFreeFly(dt);
-    this.flyer.universePosition(this.cameraPosition);
-    this.flyer.universeOrientation(this.cameraOrientation);
+    // 2. The active controller, in its reference frame -> the camera's universe pose.
+    if (this.mode === 'walk') {
+      this.player.update(dt, this.input);
+      this.planet.toUniverse(this.player.eyePosition(this.cameraPosition), this.cameraPosition);
+      orientationToUniverse(this.planet, this.player.eyeOrientation(this.cameraOrientation), this.cameraOrientation);
+    } else {
+      this.updateFreeFly(dt);
+      this.flyer.universePosition(this.cameraPosition);
+      this.flyer.universeOrientation(this.cameraOrientation);
+    }
 
     // 3. The world reacts to where the camera is now.
     this.planet.update(this.cameraPosition, this.sunDirection);
@@ -187,8 +232,7 @@ export class Game {
     // 4. Last step before rendering: move the universe so the camera sits at the origin.
     this.universe.placeCamera(this.camera, this.cameraPosition, this.cameraOrientation);
 
-    this.clickToPlay.classList.toggle('hidden', this.input.pointerLocked);
-    this.hud.update(dt);
+    this.updateHud(dt);
   }
 
   private updateFreeFly(dt: number): void {
@@ -216,6 +260,34 @@ export class Game {
     }
   }
 
+  /**
+   * Picks the planet's spin phase so that, at time 0, the sun stands `elevationDegrees` above the
+   * horizon at `localUp` and is rising: a morning start. Brute force over 720 candidate phases.
+   */
+  private chooseStartTime(localUp: THREE.Vector3, elevationDegrees: number): void {
+    const target = Math.sin(THREE.MathUtils.degToRad(elevationDegrees));
+    const up = localUp.clone().normalize();
+    const sunHeight = (phase: number) => {
+      this.planet.spinPhase = phase;
+      this.planet.updateSpin(0);
+      return up.clone().applyQuaternion(this.planet.quaternion).dot(this.sunDirection);
+    };
+    let best = 0;
+    let bestError = Infinity;
+    for (let i = 0; i < 720; i++) {
+      const phase = (i / 720) * Math.PI * 2;
+      const height = sunHeight(phase);
+      const rising = sunHeight(phase + 0.01) > height;
+      const error = Math.abs(height - target);
+      if (rising && error < bestError) {
+        best = phase;
+        bestError = error;
+      }
+    }
+    this.planet.spinPhase = best;
+    this.planet.updateSpin(this.time);
+  }
+
   private render(): void {
     this.renderer.render(this.universe.scene, this.camera);
   }
@@ -224,7 +296,8 @@ export class Game {
     const input = this.input;
     if (input.wasPressed('Digit1')) this.goToOrbit();
     if (input.wasPressed('Digit2')) this.goToBeacon();
-    if (input.wasPressed('Digit3')) this.goToSurface(new THREE.Vector3(0.042, 0.468, 0.883), 30, new THREE.Vector3(-1, 0, 0));
+    if (input.wasPressed('Digit3')) this.respawn();
+    if (input.wasPressed('KeyV')) this.toggleFly();
     if (input.wasPressed('KeyT')) {
       this.timeScale = TIME_SCALES[(TIME_SCALES.indexOf(this.timeScale) + 1) % TIME_SCALES.length];
     }
@@ -253,6 +326,13 @@ export class Game {
     this.camera.updateProjectionMatrix();
   }
 
+  private updateHud(dt: number): void {
+    this.clickToPlay.classList.toggle('hidden', this.input.pointerLocked);
+    this.jetpackBar.classList.toggle('hidden', this.mode !== 'walk');
+    this.jetpackFill.style.width = `${(this.player.jetpackFuel * 100).toFixed(1)}%`;
+    this.hud.update(dt);
+  }
+
   /** Sun elevation above the horizon at the camera, in degrees. */
   private sunElevation(): number {
     const up = this.cameraPosition.clone().sub(this.planet.position).normalize();
@@ -264,10 +344,14 @@ export class Game {
     const info = this.renderer.info.render;
     const terrain = this.planet.terrain.stats;
     const elevation = this.sunElevation();
+    const player = this.player;
+    const motion = this.mode === 'fly'
+      ? `fly     ${formatSpeed(this.flyer.velocity.length())}  (wheel x${2 ** this.flyer.speedExponent}, frame: ${this.flyer.frame.name})`
+      : `walk    ${formatSpeed(player.speed)}  ${player.swimming ? 'swimming' : player.grounded ? 'on ground' : 'in the air'}, jetpack ${(player.jetpackFuel * 100).toFixed(0)}%`;
     return [
       `pos     x ${p.x.toFixed(2)}  y ${p.y.toFixed(2)}  z ${p.z.toFixed(2)}`,
       `planet  ${formatDistance(p.distanceTo(this.planet.position))} from centre, altitude ${formatDistance(this.planet.altitude(p))}`,
-      `speed   ${formatSpeed(this.flyer.velocity.length())}  (wheel x${2 ** this.flyer.speedExponent}, frame: ${this.flyer.frame.name})`,
+      motion,
       `time    x${this.timeScale}  sun ${elevation >= 0 ? '+' : ''}${elevation.toFixed(0)}° ${elevation > 0 ? 'day' : 'night'}`,
       `terrain ${terrain.visible} chunks drawn / ${terrain.meshes} built, deepest L${terrain.deepestVisible} of ${this.planet.terrain.maxLevel}`,
       `workers ${this.workers.runningCount} busy, ${this.workers.queuedCount} queued`,

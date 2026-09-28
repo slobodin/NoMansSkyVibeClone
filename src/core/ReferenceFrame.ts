@@ -37,12 +37,16 @@ export function positionToFrame(frame: ReferenceFrame, universe: THREE.Vector3, 
   return out.copy(universe).sub(frame.position).applyQuaternion(inverse);
 }
 
+// multiplyQuaternions(a, b) reads both inputs before writing, so `out` may be the same object as
+// the input quaternion (all helpers here are safe to call in place).
+
 export function orientationToUniverse(frame: ReferenceFrame, local: THREE.Quaternion, out: THREE.Quaternion): THREE.Quaternion {
-  return out.copy(frame.quaternion).multiply(local);
+  return out.multiplyQuaternions(frame.quaternion, local);
 }
 
 export function orientationToFrame(frame: ReferenceFrame, universe: THREE.Quaternion, out: THREE.Quaternion): THREE.Quaternion {
-  return out.copy(frame.quaternion).invert().multiply(universe);
+  inverse.copy(frame.quaternion).invert();
+  return out.multiplyQuaternions(inverse, universe);
 }
 
 /** Rotates a direction (not a position: no translation) from the frame into universe axes. */
