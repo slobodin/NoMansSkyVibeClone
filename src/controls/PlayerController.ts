@@ -150,14 +150,14 @@ export class PlayerController {
     const horizontal = this.horizontal.copy(this.velocity).addScaledVector(up, -verticalSpeed);
 
     // What the keys ask for, as a horizontal velocity.
-    const moveInput = this.wish
+    const wish = this.wish
       .copy(this.heading)
       .multiplyScalar(input.axis('KeyS', 'KeyW'))
       .addScaledVector(right, input.axis('KeyA', 'KeyD'));
-    const moving = moveInput.lengthSq() > 0;
+    const moving = wish.lengthSq() > 0;
     let topSpeed = this.swimming ? SWIM_SPEED : input.isDown('ShiftLeft') ? SPRINT_SPEED : WALK_SPEED;
     if (!this.swimming && depth > 0.3) topSpeed *= 0.6; // wading through shallow water
-    const wish = moveInput.normalize().multiplyScalar(topSpeed);
+    wish.normalize().multiplyScalar(topSpeed);
     let jumped = false;
 
     if (this.swimming) {
@@ -173,11 +173,12 @@ export class PlayerController {
       this.slopeAt(up);
       const slope = Math.acos(THREE.MathUtils.clamp(this.groundNormal.dot(up), -1, 1));
       if (slope > MAX_WALK_SLOPE) {
-        // Too steep: no walking uphill, and gravity's along-slope part slides us down.
+        // Too steep: no walking uphill, and gravity's along-slope part slides us down (with
+        // little grip left to brake: the feet lose traction).
         const uphillPart = wish.dot(this.downhill);
         if (uphillPart < 0) wish.addScaledVector(this.downhill, -uphillPart);
         horizontal.addScaledVector(this.downhill, g * Math.sin(slope) * h);
-        moveTowards(horizontal, wish, GROUND_ACCELERATION * 0.2 * h);
+        moveTowards(horizontal, wish, GROUND_ACCELERATION * 0.05 * h);
       } else {
         moveTowards(horizontal, wish, GROUND_ACCELERATION * h);
       }

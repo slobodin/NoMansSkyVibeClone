@@ -89,7 +89,7 @@ export class Game {
   private readonly jetpackFill = document.getElementById('jetpack-fill')!;
 
   constructor(container: HTMLElement) {
-    // No canvas antialiasing: the scene is drawn into a multisampled target (RenderPipeline.ts).
+    // No canvas antialiasing: the pipeline antialiases the final image with FXAA instead.
     this.renderer = new THREE.WebGLRenderer({ antialias: false, logarithmicDepthBuffer: true });
     this.renderer.setPixelRatio(1); // perf target is a weak integrated GPU, see PLAN.md
     // A frame is several render() calls (scene + post passes): count them all for the HUD.

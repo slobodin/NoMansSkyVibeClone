@@ -10,12 +10,13 @@ import { OCEAN_GLSL, type OceanUniforms } from './ocean';
  *   1. The scene (stars, sun, terrain, ...) is rendered into an HDR render target: half-float
  *      colour, so values above 1.0 survive (the sun is ~60), plus a depth texture.
  *   2. A full-screen "composite" pass reads colour + depth and, per pixel, adds everything that
- *      is best done knowing how far away the scene is: the atmosphere (sky, aerial perspective),
- *      then tone mapping and the conversion to sRGB.
+ *      is best done knowing how far away the scene is: the ocean (ocean.ts), the atmosphere
+ *      (atmosphere.ts: sky, aerial perspective), then exposure, tone mapping and sRGB.
  *   3. FXAA smooths jagged edges in the final image.
  *
- * Doing the atmosphere as a post-process means one piece of code handles the sky, the haze in
- * front of distant mountains and the glowing rim of the planet seen from orbit.
+ * Doing the atmosphere and the ocean as a post-process means one piece of code handles the sky,
+ * the haze in front of distant mountains and the glowing rim of the planet seen from orbit, and
+ * the water knows how deep it is everywhere without any extra geometry.
  *
  * Why FXAA and not MSAA? With MSAA, a pixel on a hill's silhouette is resolved to a blend of
  * grass and *black space* (the sky only gets its colour in pass 2), and pass 2 cannot tell - so
