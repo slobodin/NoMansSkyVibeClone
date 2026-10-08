@@ -20,3 +20,16 @@ export function orbitOffset(orbit: OrbitConfig, time: number, out: THREE.Vector3
     .multiplyScalar(orbit.radius)
     .applyAxisAngle(X_AXIS, orbit.inclination);
 }
+
+/**
+ * The derivative of orbitOffset: the body's velocity relative to its parent, in metres per game
+ * second. For a circle that is the radius times the angular speed, along the tangent.
+ */
+export function orbitVelocity(orbit: OrbitConfig, time: number, out: THREE.Vector3): THREE.Vector3 {
+  const angularSpeed = (2 * Math.PI) / orbit.period;
+  const angle = orbit.phase + angularSpeed * time;
+  return out
+    .set(-Math.sin(angle), 0, -Math.cos(angle))
+    .multiplyScalar(orbit.radius * angularSpeed)
+    .applyAxisAngle(X_AXIS, orbit.inclination);
+}

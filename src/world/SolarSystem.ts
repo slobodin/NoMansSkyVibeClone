@@ -1,8 +1,12 @@
 import * as THREE from 'three';
+import { UNIVERSE_FRAME, type ReferenceFrame } from '../core/ReferenceFrame';
 import type { ChunkWorkerPool } from '../planet/ChunkWorkerPool';
 import { Planet } from '../planet/Planet';
 import type { PlanetConfig } from '../planet/PlanetConfig';
 import { Star } from './Star';
+
+/** Within this many radii of a body, things fly in its rotating frame (see frameAt). */
+const ROTATING_FRAME_RADII = 3;
 
 export interface StarConfig {
   name: string;
@@ -20,7 +24,8 @@ export interface StarConfig {
  *
  * `bodyAt` answers which body's *sphere of influence* (SOI) a point is in: the region where the
  * camera should travel along with that body rather than stay put among the stars. Spheres nest -
- * a moon's lies inside its planet's - and the innermost one wins.
+ * a moon's lies inside its planet's - and the innermost one wins. `frameAt` turns that into the
+ * reference frame to fly in.
  */
 export class SolarSystem {
   readonly star: Star;
@@ -28,6 +33,8 @@ export class SolarSystem {
 
   private readonly byName = new Map<string, Planet>();
   private readonly depth = new Map<Planet, number>();
+  /** The star does not move: it is the parent "body" of the planets. */
+  private readonly starMotion = { position: new THREE.Vector3(), velocity: new THREE.Vector3() };
 
   constructor(star: StarConfig, bodies: readonly PlanetConfig[], pool: ChunkWorkerPool) {
     // The star sits at the universe origin: the universe frame is "space" around the star.
@@ -51,12 +58,16 @@ export class SolarSystem {
     return body;
   }
 
-  /** Moves everything to where it is at game time `time`. */
-  update(time: number): void {
+  /**
+   * Moves everything to where it is at game time `time`. `rate` is the time speed-up (game
+   * seconds per real second); it only scales the velocities.
+   */
+  update(time: number, rate = 1): void {
+    this.starMotion.position.copy(this.star.position);
     // Bodies are listed parents-first, so a moon's parent has already moved.
     for (const body of this.bodies) {
-      body.updateOrbit(time, body.parent ? body.parent.position : this.star.position);
-      body.updateSpin(time);
+      body.updateOrbit(time, rate, body.parent ?? this.starMotion);
+      body.updateSpin(time, rate);
       this.star.directionFrom(body.position, body.sunDirection);
     }
   }
@@ -69,6 +80,19 @@ export class SolarSystem {
       if (!best || this.depth.get(body)! > this.depth.get(best)!) best = body;
     }
     return best;
+  }
+
+  /**
+   * The natural reference frame for something flying at `position`:
+   *   close to a body   -> the body's rotating frame: hover over the same spot as it spins
+   *   within its SOI    -> the body's inertial frame: follow it around its orbit, no spin
+   *   in open space     -> the universe frame: stay put relative to the star
+   */
+  frameAt(position: THREE.Vector3): ReferenceFrame {
+    const body = this.bodyAt(position);
+    if (!body) return UNIVERSE_FRAME;
+    const close = position.distanceTo(body.position) < body.radius * ROTATING_FRAME_RADII;
+    return close ? body : body.inertialFrame;
   }
 
   /** The body closest to `position`, measured to its sea-level sphere. */

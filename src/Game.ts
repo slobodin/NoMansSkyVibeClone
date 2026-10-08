@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { FreeFlyController } from './controls/FreeFlyController';
 import { PlayerController } from './controls/PlayerController';
 import { Input } from './core/Input';
-import { directionToFrame, orientationToFrame, orientationToUniverse, UNIVERSE_FRAME, type ReferenceFrame } from './core/ReferenceFrame';
+import { directionToFrame, orientationToFrame, orientationToUniverse } from './core/ReferenceFrame';
 import { Universe } from './core/Universe';
 import { saveScreenshot } from './dev/DevTools';
 import { ChunkWorkerPool } from './planet/ChunkWorkerPool';
@@ -25,8 +25,6 @@ const SPAWN_DIRECTION = new THREE.Vector3(-0.1205, -0.0173, 0.9926);
 const SPAWN_HEADING = new THREE.Vector3(0.9927, 0, 0.1205);
 /** Sun elevation (degrees, rising) at the spawn point when the game starts. */
 const START_SUN_ELEVATION = 25;
-/** Within this many radii of a body the free camera turns with it (hovering over the ground). */
-const ROTATING_FRAME_RADII = 3;
 /** T cycles through these game-time multipliers (the day/night cycle speeds up). */
 const TIME_SCALES = [1, 10, 60, 300];
 /** Exposure by day and by night: a crude stand-in for the eye adapting to the dark. */
@@ -122,7 +120,7 @@ export class Game {
     this.beacon = new TestBeacon(BEACON_POSITION);
     this.universe.root.add(this.beacon.object);
 
-    this.system.update(this.time);
+    this.system.update(this.time, this.timeScale);
     this.player = new PlayerController(this.home);
     this.chooseStartTime(this.home, SPAWN_DIRECTION, START_SUN_ELEVATION);
     this.respawn();
@@ -229,7 +227,7 @@ export class Game {
 
     // 1. Celestial motion: game time drives every orbit and spin.
     this.time += dt * this.timeScale;
-    this.system.update(this.time);
+    this.system.update(this.time, this.timeScale);
 
     // 2. The active controller, in its reference frame -> the camera's universe pose.
     if (this.mode === 'walk') {
@@ -261,23 +259,11 @@ export class Game {
     this.updateHud(dt);
   }
 
-  /**
-   * The free camera's frame depends on where it is (its "sphere of influence" logic):
-   *   close to a body   -> the body's rotating frame: hover over the same spot as it spins
-   *   within its SOI    -> the body's inertial frame: follow it around its orbit, no spin
-   *   in open space     -> the universe frame: stay put relative to the star
-   */
-  private freeFlyFrame(position: THREE.Vector3): ReferenceFrame {
-    const body = this.system.bodyAt(position);
-    if (!body) return UNIVERSE_FRAME;
-    const close = position.distanceTo(body.position) < body.radius * ROTATING_FRAME_RADII;
-    return close ? body : body.inertialFrame;
-  }
-
   private updateFreeFly(dt: number): void {
     const flyer = this.flyer;
     const position = flyer.universePosition(new THREE.Vector3());
-    flyer.setFrame(this.freeFlyFrame(position));
+    // The free camera's frame depends on where it is (the sphere-of-influence logic).
+    flyer.setFrame(this.system.frameAt(position));
 
     // Level the horizon when low over a body.
     const body = this.system.nearestBody(position);

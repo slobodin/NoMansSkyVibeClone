@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { positionToFrame, positionToUniverse, type ReferenceFrame } from '../core/ReferenceFrame';
 import { createAtmosphereParams, type AtmosphereParams } from '../render/atmosphere';
 import { createOceanUniforms, type OceanUniforms } from '../render/ocean';
-import { orbitOffset } from '../world/orbit';
+import { orbitOffset, orbitVelocity } from '../world/orbit';
 import type { ChunkWorkerPool } from './ChunkWorkerPool';
 import type { PlanetConfig } from './PlanetConfig';
 import { Terrain } from './Terrain';
@@ -34,6 +34,10 @@ export class Planet implements ReferenceFrame {
   readonly ocean: OceanUniforms;
   /** Moves with the planet, but its axes stay parallel to the universe's: no spin. */
   readonly inertialFrame: ReferenceFrame;
+  /** Velocity of the centre, universe axes, m per real second (ReferenceFrame). */
+  readonly velocity = new THREE.Vector3();
+  /** Spin axis times radians per real second, universe axes (ReferenceFrame). */
+  readonly angularVelocity = new THREE.Vector3();
   /** The body this one orbits, or null for the star. Set by SolarSystem. */
   parent: Planet | null = null;
   /** Unit vector from the centre towards the star, universe axes. Set by SolarSystem. */
@@ -42,6 +46,8 @@ export class Planet implements ReferenceFrame {
   spinPhase = 0;
 
   private readonly tilt: THREE.Quaternion;
+  /** The spin axis in universe axes: local +Y, tilted. It never changes. */
+  private readonly spinAxis: THREE.Vector3;
   private readonly spin = new THREE.Quaternion();
   private readonly tmp = new THREE.Vector3();
   private readonly rotation = new THREE.Matrix4();
@@ -53,6 +59,7 @@ export class Planet implements ReferenceFrame {
   ) {
     this.group.name = config.name;
     this.tilt = new THREE.Quaternion().setFromAxisAngle(X_AXIS, config.axialTilt);
+    this.spinAxis = Y_AXIS.clone().applyQuaternion(this.tilt);
     this.generator = new TerrainGenerator(config);
     this.atmosphere = createAtmosphereParams(config, sunIntensity);
     this.ocean = createOceanUniforms(config, this.atmosphere);
@@ -61,8 +68,11 @@ export class Planet implements ReferenceFrame {
     this.group.add(this.terrain.group);
     this.inertialFrame = {
       name: `${config.name} orbit`,
-      position: this.group.position, // the same Vector3: always where the planet is
+      // The same Vector3 objects as the planet's: always where the planet is, moving with it.
+      position: this.group.position,
+      velocity: this.velocity,
       quaternion: new THREE.Quaternion(),
+      angularVelocity: new THREE.Vector3(),
     };
   }
 
@@ -88,19 +98,25 @@ export class Planet implements ReferenceFrame {
     return this.group.quaternion;
   }
 
-  /** Moves the planet to where its orbit puts it at game time `time`. */
-  updateOrbit(time: number, parentPosition: THREE.Vector3): void {
-    orbitOffset(this.config.orbit, time, this.group.position).add(parentPosition);
+  /**
+   * Moves the planet to where its orbit puts it at game time `time`. `rate` is game seconds per
+   * real second (the time speed-up): velocities are per real second, because that is what the
+   * player's and ship's physics integrate with.
+   */
+  updateOrbit(time: number, rate: number, parent: { position: THREE.Vector3; velocity: THREE.Vector3 }): void {
+    orbitOffset(this.config.orbit, time, this.group.position).add(parent.position);
+    orbitVelocity(this.config.orbit, time, this.velocity).multiplyScalar(rate).add(parent.velocity);
   }
 
   /**
    * Turns the planet to where it is at game time `time`: first spin about the local +Y axis,
    * then tilt that axis. (Quaternions compose right to left: q = tilt * spin.)
    */
-  updateSpin(time: number): void {
-    const angle = this.spinPhase + (2 * Math.PI * time) / this.config.rotationPeriod;
-    this.spin.setFromAxisAngle(Y_AXIS, angle);
+  updateSpin(time: number, rate = 1): void {
+    const angularSpeed = (2 * Math.PI) / this.config.rotationPeriod;
+    this.spin.setFromAxisAngle(Y_AXIS, this.spinPhase + angularSpeed * time);
     this.group.quaternion.copy(this.tilt).multiply(this.spin);
+    this.angularVelocity.copy(this.spinAxis).multiplyScalar(angularSpeed * rate);
   }
 
   /** Universe position -> planet-local position. */
@@ -117,6 +133,15 @@ export class Planet implements ReferenceFrame {
   terrainHeight(localPosition: THREE.Vector3): number {
     const dir = this.tmp.copy(localPosition).normalize();
     return this.generator.height(dir.x, dir.y, dir.z);
+  }
+
+  /**
+   * Height of what you can rest on, above sea level: the terrain, or the sea surface (0) where
+   * the terrain is flooded. The player swims below it; the ship skims and lands on top of it.
+   */
+  floorHeight(localPosition: THREE.Vector3): number {
+    const height = this.terrainHeight(localPosition);
+    return this.hasOcean ? Math.max(height, 0) : height;
   }
 
   /** Height of a planet-local position above the terrain surface. */
