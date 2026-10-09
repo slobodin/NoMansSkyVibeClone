@@ -46,18 +46,20 @@ const TIME_SCALES = [1, 10, 60, 300];
 const DAY_EXPOSURE = 0.75;
 const NIGHT_EXPOSURE = 3;
 
-const HELP = `ON FOOT  mouse look (click to capture, Esc to release)
+const HELP = `ON FOOT
+mouse    look (click to capture, Esc to release)
 W A S D  move          Shift  sprint
 Space    jump, hold for jetpack (swim up in water)
-C        dive (in water)
-E        board the ship (when next to it)
-SHIP     mouse pitch/yaw   A/D roll   W/S throttle/brake   Shift boost
+C        dive (in water)        E  board the ship (next to it)
+IN THE SHIP
+mouse    pitch / yaw   A D  roll   W / S  throttle / brake   Shift  boost
 Space    take off      E  land / get out      C  chase / cockpit view
-J        pulse drive (in space): crosses between planets in seconds
-V        toggle free-fly camera (Space/C up/down, Q/E roll, wheel speed)
+J        pulse drive (in space)
+ANYWHERE
+V        free-fly camera (Space/C up/down, Q/E roll, wheel speed)
 T        time speed x1 / x10 / x60 / x300
 1-7      fly to Ember, Verdant, Lull, Rime, Sulfa, Nyx, Shard
-0  respawn on foot   9  test beacon
+0  respawn by the ship   9  test beacon
 F2 screenshot   F3 debug panel   F4 terrain LOD view   H help`;
 
 type Mode = 'walk' | 'ship' | 'fly';
@@ -66,6 +68,9 @@ type Mode = 'walk' | 'ship' | 'fly';
  * Owns the renderer, the scene and all systems, and runs the frame loop:
  *
  *   frame: dt -> update(dt) [time -> orbits & spins -> controller -> world] -> placeCamera -> render
+ *
+ * The controller is whoever has the camera (`mode`): the player on foot, the ship (flight model
+ * in ship/Ship.ts, camera in ship/ShipCamera.ts), or the free-fly debug camera.
  */
 export class Game {
   readonly renderer: THREE.WebGLRenderer;
