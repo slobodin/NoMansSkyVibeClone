@@ -14,6 +14,7 @@ import {
 } from '../core/ReferenceFrame';
 import type { Planet } from '../planet/Planet';
 import type { SolarSystem } from '../world/SolarSystem';
+import type { Star } from '../world/Star';
 import { FEET, GEAR_HEIGHT, ShipModel } from './shipModel';
 
 export type ShipState = 'landed' | 'takeoff' | 'flying' | 'landing';
@@ -56,12 +57,29 @@ const MAX_LANDING_SLOPE = THREE.MathUtils.degToRad(30);
 const MAX_DESCENT_SPEED = 40; // m/s
 /** 1/s: how quickly the ship glides over to the landing spot (it covers 1/rate of a second's flight). */
 const LANDING_GLIDE_RATE = 2;
+
+/**
+ * Pulse drive: in space, cruise at a speed proportional to the distance to the nearest surface
+ * (the same trick as the free camera). Open space is crossed at up to 30 km/s, and flying at a
+ * moon slows you down by itself - the distance shrinks exponentially, so you arrive instead of
+ * crashing - until the drive drops out a few km above the surface.
+ */
+const PULSE_RATE = 0.5; // 1/s: pulse speed = PULSE_RATE x distance to the nearest surface
+const PULSE_MAX = 30_000; // m/s
+const PULSE_MIN_DISTANCE = 4000; // m from any surface to engage...
+const PULSE_DROP_DISTANCE = 3000; // ...and it drops out when closer than this
+const PULSE_SPOOL = 1.2; // 1/s: how fast the speed rises to the pulse speed
+const PULSE_STEER_RESPONSE = 2.5; // 1/s: turning is sluggish at pulse speed
+const PULSE_GRIP = 3; // 1/s: the velocity follows the nose closely
+
 /**
  * Speed limit right after switching frames. Converting the velocity keeps the ship's momentum,
  * but with time sped up x300 planets move at tens of km/s, and the arcade ship should not
  * inherit that.
  */
 const MAX_FRAME_SPEED = 3 * SPACE.boostSpeed;
+/** The ship stays this far outside the star's surface. */
+const STAR_CLEARANCE = 1000; // m
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 
@@ -79,6 +97,7 @@ const FORWARD = new THREE.Vector3(0, 0, -1);
  * The flight model is arcade, not Newtonian: no gravity, and the velocity relative to the
  * current frame is steered towards the nose by `grip`, accelerated by W and bled off by `drag`.
  * Collision is analytic, like the player's: the hull centre stays CLEARANCE above the floor.
+ * In space, J engages the pulse drive (see PULSE_RATE) to cross between bodies in seconds.
  */
 export class Ship {
   readonly model = new ShipModel();
@@ -93,6 +112,13 @@ export class Ship {
   body: Planet | null = null;
   altitude = 0;
   spaceFactor = 1;
+  /** Distance to the nearest surface of anything: bodies and the star. */
+  surfaceDistance = Infinity;
+  /** Pulse drive engaged? And 0..1, eased, for the visuals (engine colour, field of view). */
+  pulse = false;
+  pulseLevel = 0;
+  /** Something the HUD should tell the player (e.g. why the pulse drive dropped out). */
+  notice: string | null = null;
 
   private timer = 0;
   private gear = 1;
@@ -126,6 +152,24 @@ export class Ship {
   /** Speed relative to the current frame, m/s. */
   get speed(): number {
     return this.velocity.length();
+  }
+
+  /** True when J would engage the pulse drive. */
+  get canPulse(): boolean {
+    return this.state === 'flying' && !this.pulse && this.spaceFactor >= 1 && this.surfaceDistance > PULSE_MIN_DISTANCE;
+  }
+
+  /** J: engages or disengages the pulse drive. Returns why not, if it can't engage. */
+  togglePulse(): string | null {
+    if (this.pulse) {
+      this.dropOutOfPulse();
+      return null;
+    }
+    if (this.state !== 'flying') return null;
+    if (this.spaceFactor < 1) return 'pulse drive: climb out of the atmosphere first';
+    if (this.surfaceDistance <= PULSE_MIN_DISTANCE) return `pulse drive: too close to ${this.body?.name ?? 'a surface'}`;
+    this.pulse = true;
+    return null;
   }
 
   /** True when E would start a landing (low enough, flying). */
@@ -165,6 +209,7 @@ export class Ship {
     this.measureAltitude(body);
     const ceiling = body.config.atmosphere?.height ?? AIRLESS_CEILING;
     this.spaceFactor = THREE.MathUtils.smoothstep(this.altitude, ceiling, ceiling * 1.5);
+    this.surfaceDistance = system.surfaceDistance(this.universe);
 
     switch (this.state) {
       case 'landed':
@@ -189,7 +234,9 @@ export class Ship {
     if (this.state === 'flying' || this.state === 'takeoff') {
       this.position.addScaledVector(this.velocity, dt);
       this.collide(body);
+      this.avoidStar(system.star);
     }
+    this.pulseLevel += ((this.pulse ? 1 : 0) - this.pulseLevel) * (1 - Math.exp(-3 * dt));
     this.updateModel();
   }
 
@@ -214,7 +261,8 @@ export class Ship {
     positionToFrame(frame, position, this.position);
     orientationToFrame(frame, orientation, this.orientation);
     velocityToFrame(frame, position, velocity, this.velocity);
-    if (this.velocity.length() > MAX_FRAME_SPEED) this.velocity.setLength(MAX_FRAME_SPEED);
+    const limit = this.pulse ? PULSE_MAX : MAX_FRAME_SPEED;
+    if (this.velocity.length() > limit) this.velocity.setLength(limit);
   }
 
   /** Copies the universe pose to the 3D model, plus gear and engine glow. */
@@ -222,7 +270,7 @@ export class Ship {
     this.universePosition(this.model.object.position);
     this.universeOrientation(this.model.object.quaternion);
     this.model.setGear(this.gear);
-    this.model.setEngines(this.thrust, false);
+    this.model.setEngines(this.thrust, this.pulseLevel > 0.5);
   }
 
   // --- States -------------------------------------------------------------------------------------
@@ -241,12 +289,21 @@ export class Ship {
   }
 
   private fly(dt: number, input: Input): void {
+    // The pulse drive cuts out on the brake, in air, and close to anything.
+    if (this.pulse) {
+      if (input.isDown('KeyS') || this.spaceFactor < 1) this.dropOutOfPulse();
+      else if (this.surfaceDistance < PULSE_DROP_DISTANCE) {
+        this.dropOutOfPulse();
+        this.notice = `pulse drive off: ${this.body?.name ?? 'surface'} ahead`;
+      }
+    }
+
     // --- Steering: mouse = pitch and yaw, A / D = roll ---
     // Mouse movement queues up a turn that is played out over a few frames: smooth, but still
     // exactly as far as the mouse moved.
     this.pendingPitch = THREE.MathUtils.clamp(this.pendingPitch - input.mouseDY * MOUSE_SENSITIVITY, -MAX_PENDING_TURN, MAX_PENDING_TURN);
     this.pendingYaw = THREE.MathUtils.clamp(this.pendingYaw - input.mouseDX * MOUSE_SENSITIVITY, -MAX_PENDING_TURN, MAX_PENDING_TURN);
-    const take = 1 - Math.exp(-STEER_RESPONSE * dt);
+    const take = 1 - Math.exp(-(this.pulse ? PULSE_STEER_RESPONSE : STEER_RESPONSE) * dt);
     const pitch = this.pendingPitch * take;
     const yaw = this.pendingYaw * take;
     this.pendingPitch -= pitch;
@@ -264,6 +321,16 @@ export class Ship {
     const nose = this.noseDirection();
     let speed = this.velocity.dot(nose);
     const lateral = this.lateral.copy(this.velocity).addScaledVector(nose, -speed);
+    if (this.pulse) {
+      // Spool up towards the pulse speed; when it falls (something is getting closer), follow
+      // it down at once.
+      const target = THREE.MathUtils.clamp(PULSE_RATE * this.surfaceDistance, SPACE.boostSpeed, PULSE_MAX);
+      speed = speed < target ? speed + (target - speed) * (1 - Math.exp(-PULSE_SPOOL * dt)) : target;
+      lateral.multiplyScalar(Math.exp(-PULSE_GRIP * dt));
+      this.velocity.copy(nose).multiplyScalar(speed).add(lateral);
+      this.thrust = 1;
+      return;
+    }
     const forward = input.isDown('KeyW');
     const boosting = forward && input.isDown('ShiftLeft');
     const top = boosting ? h.boostSpeed : h.maxSpeed;
@@ -275,7 +342,9 @@ export class Ship {
     // Neither: cruise control, keep the speed. Above the top speed (after a boost, or diving
     // in from space), the excess bleeds off.
     if (speed > top) speed = top + (speed - top) * Math.exp(-h.drag * dt);
+    // Sideways drift dies out at the grip rate - and so does moving backwards (after a hard turn).
     lateral.multiplyScalar(Math.exp(-h.grip * dt));
+    if (speed < 0) speed *= Math.exp(-h.grip * dt);
     this.velocity.copy(nose).multiplyScalar(speed).add(lateral);
 
     this.thrust = boosting ? 1 : forward ? 0.6 : 0.12;
@@ -314,6 +383,28 @@ export class Ship {
   }
 
   // --- Helpers ------------------------------------------------------------------------------------
+
+  /** Leaving pulse, the ship sheds its speed down to normal space flight. */
+  private dropOutOfPulse(): void {
+    this.pulse = false;
+    if (this.velocity.length() > SPACE.maxSpeed) this.velocity.setLength(SPACE.maxSpeed);
+  }
+
+  /** No flying into the sun: push the ship back out to STAR_CLEARANCE above its surface. */
+  private avoidStar(star: Star): void {
+    this.universePosition(this.universe);
+    const outward = this.tmp.copy(this.universe).sub(star.position);
+    const distance = outward.length();
+    const minimum = star.radius + STAR_CLEARANCE;
+    if (distance >= minimum) return;
+    outward.divideScalar(distance);
+    this.universe.addScaledVector(outward, minimum - distance);
+    positionToFrame(this.frame, this.universe, this.position);
+    const inward = directionToFrame(this.frame, outward, this.local);
+    const into = this.velocity.dot(inward);
+    if (into < 0) this.velocity.addScaledVector(inward, -into);
+    if (this.pulse) this.dropOutOfPulse();
+  }
 
   private noseDirection(): THREE.Vector3 {
     return this.nose.copy(FORWARD).applyQuaternion(this.orientation);

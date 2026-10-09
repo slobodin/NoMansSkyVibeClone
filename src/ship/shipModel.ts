@@ -34,6 +34,7 @@ export class ShipModel {
   private readonly legs: THREE.Group[] = [];
   private readonly nozzleMaterial = new THREE.MeshBasicMaterial();
   private readonly flameMaterial = new THREE.MeshBasicMaterial({
+    vertexColors: true,
     transparent: true,
     blending: THREE.AdditiveBlending,
     side: THREE.DoubleSide,
@@ -76,6 +77,10 @@ export class ShipModel {
     nacelleGeometry.rotateX(Math.PI / 2);
     const flameGeometry = new THREE.ConeGeometry(0.42, 1, 12, 1, true);
     flameGeometry.translate(0, 0.5, 0); // base at the origin, tip at +Y...
+    // Brightest at the nozzle, fading to nothing at the tip (with additive blending, black adds nothing).
+    const heights = flameGeometry.getAttribute('position');
+    const fade = new Float32Array(heights.count * 3).map((_, i) => (1 - heights.getY(Math.floor(i / 3))) ** 2);
+    flameGeometry.setAttribute('color', new THREE.BufferAttribute(fade, 3));
     flameGeometry.rotateX(Math.PI / 2); // ...now pointing backwards (+Z)
     for (const side of [-1, 1]) {
       this.add(new THREE.Mesh(nacelleGeometry, dark), side * 1.25, -0.2, 3);
@@ -124,8 +129,8 @@ export class ShipModel {
   setEngines(thrust: number, pulse: boolean): void {
     const color = pulse ? PULSE_COLOR : ENGINE_COLOR;
     this.nozzleMaterial.color.copy(color).multiplyScalar(pulse ? 60 : 0.03 + 25 * thrust);
-    this.flameMaterial.color.copy(color).multiplyScalar(pulse ? 6 : 3 * thrust);
-    const length = pulse ? 7 : 0.3 + 3.5 * thrust;
+    this.flameMaterial.color.copy(color).multiplyScalar(pulse ? 1.2 : 1.5 * thrust);
+    const length = pulse ? 4 : 0.3 + 2.5 * thrust;
     for (const flame of this.flames) {
       flame.visible = pulse || thrust > 0.02;
       flame.scale.set(1, 1, length);

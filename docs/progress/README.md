@@ -162,3 +162,12 @@ Atmospheric flight at 160 m/s, chase camera. Low down the ship handles like a pl
 "grip" turns its velocity towards the nose and the wings level themselves. Climbing out of the
 air it blends into space handling: faster, drifting, no levelling. Space takes off, E lands on
 a spot picked ahead (refused over water or slopes above 30°).
+
+### 020 — Pulse drive from Verdant to Lull
+
+![020](020-m4-pulse-drive-from-verdant-to-lull.jpg)
+
+J in space engages the pulse drive: speed = 0.5/s x the distance to the nearest surface, up to
+30 km/s. Pointed at a moon, the distance - and with it the speed - shrinks exponentially, so you
+arrive instead of crashing; the drive drops out 3 km above the surface. Verdant to Lull, from
+the spawn to standing on Lull, takes about a minute.

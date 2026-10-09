@@ -18,6 +18,7 @@ import { SolarSystem } from './world/SolarSystem';
 import { TestBeacon } from './world/TestBeacon';
 
 const FOV = 70; // vertical field of view, degrees
+const PULSE_FOV = 84; // wider in pulse: a cheap sense of speed
 const NEAR = 0.1; // m
 const FAR = 1e9; // m. The logarithmic depth buffer copes with a huge far/near ratio.
 
@@ -49,6 +50,7 @@ C        dive (in water)
 E        board the ship (when next to it)
 SHIP     mouse pitch/yaw   A/D roll   W/S throttle/brake   Shift boost
 Space    take off      E  land / get out      C  chase / cockpit view
+J        pulse drive (in space): crosses between planets in seconds
 V        toggle free-fly camera (Space/C up/down, Q/E roll, wheel speed)
 T        time speed x1 / x10 / x60 / x300
 1-7      fly to Ember, Verdant, Lull, Rime, Sulfa, Nyx, Shard
@@ -297,6 +299,8 @@ export class Game {
       orientationToUniverse(body, this.player.eyeOrientation(this.cameraOrientation), this.cameraOrientation);
     } else if (this.mode === 'ship') {
       this.ship.update(dt, this.input, this.system);
+      this.showMessage(this.ship.notice);
+      this.ship.notice = null;
       this.shipCamera.update(dt, this.ship, this.ship.body!, this.cameraPosition, this.cameraOrientation);
     } else {
       this.updateFreeFly(dt);
@@ -316,6 +320,12 @@ export class Game {
     this.pipeline.exposure = THREE.MathUtils.lerp(NIGHT_EXPOSURE, DAY_EXPOSURE, daylight);
     this.updateLights();
     this.beacon.update(this.time);
+
+    const fov = this.mode === 'ship' ? THREE.MathUtils.lerp(FOV, PULSE_FOV, this.ship.pulseLevel) : FOV;
+    if (Math.abs(fov - this.camera.fov) > 0.01) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
 
     // 4. Last step before rendering: move the universe so the camera sits at the origin.
     this.universe.placeCamera(this.camera, this.cameraPosition, this.cameraOrientation);
@@ -416,6 +426,7 @@ export class Game {
       else if (this.mode === 'ship' && this.ship.state === 'landed') this.disembark();
       else if (this.mode === 'ship' && this.ship.canLand) this.showMessage(this.ship.land());
     }
+    if (input.wasPressed('KeyJ') && this.mode === 'ship') this.showMessage(this.ship.togglePulse());
     if (input.wasPressed('KeyC') && this.mode === 'ship') {
       this.shipCamera.view = this.shipCamera.view === 'chase' ? 'cockpit' : 'chase';
     }
@@ -463,6 +474,8 @@ export class Game {
     if (this.mode !== 'ship') return '';
     if (this.ship.state === 'landed') return '[Space] take off    [E] get out    [C] view';
     if (this.ship.canLand) return '[E] land';
+    if (this.ship.pulse) return '[J] / [S] leave pulse';
+    if (this.ship.canPulse) return '[J] pulse drive';
     return '';
   }
 
@@ -492,7 +505,7 @@ export class Game {
     const player = this.player;
     const frame = this.mode === 'fly' ? this.flyer.frame.name : this.mode === 'ship' ? `${this.ship.frame.name} (ship)` : `${player.planet.name} (on foot)`;
     const motion = this.mode === 'ship'
-      ? `ship    ${this.ship.state}  ${formatSpeed(this.ship.speed)}  alt ${formatDistance(this.ship.altitude)}  ${this.ship.spaceFactor < 0.5 ? 'air' : 'space'} flight (${this.ship.spaceFactor.toFixed(2)})`
+      ? `ship    ${this.ship.state}  ${formatSpeed(this.ship.speed)}  alt ${formatDistance(this.ship.altitude)}  ${this.ship.pulse ? 'PULSE' : this.ship.spaceFactor < 0.5 ? 'air' : 'space'} flight (${this.ship.spaceFactor.toFixed(2)})`
       : this.mode === 'fly'
       ? `fly     ${formatSpeed(this.flyer.velocity.length())}  (wheel x${2 ** this.flyer.speedExponent})`
       : `walk    ${formatSpeed(player.speed)}  ${player.swimming ? 'swimming' : player.grounded ? 'on ground' : 'in the air'}, jetpack ${(player.jetpackFuel * 100).toFixed(0)}%`;
