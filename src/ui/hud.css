@@ -98,3 +98,14 @@ body {
 .hidden {
   display: none;
 }
+
+/* Context hint ("[E] board the ship"), above the jetpack bar. */
+#prompt {
+  position: absolute;
+  left: 50%;
+  bottom: 52px;
+  transform: translateX(-50%);
+  font: 14px/1.4 ui-monospace, Consolas, monospace;
+  letter-spacing: 0.04em;
+  white-space: pre;
+}

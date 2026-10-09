@@ -214,3 +214,61 @@ export function createAtmosphereParams(config: PlanetConfig, sunIntensity: THREE
     sunIntensity,
   };
 }
+
+// --- CPU twins ------------------------------------------------------------------------------------
+// The same light as the shaders compute, for things lit by three.js's built-in lights instead of
+// our own shaders (the ship): a DirectionalLight carries `sunlightAt`, a HemisphereLight the
+// `skyIrradiance`. Evaluated once per frame at the camera, so plain JS is fast enough.
+
+const toPoint = new THREE.Vector3();
+const sample = new THREE.Vector3();
+
+/** CPU version of the GLSL sunVisibility: 0..1, how much of the sun is above p's horizon. */
+export function sunVisibility(a: AtmosphereParams, p: THREE.Vector3): number {
+  toPoint.copy(p).sub(a.center);
+  const r = toPoint.length();
+  const sunElevation = Math.asin(THREE.MathUtils.clamp(toPoint.dot(a.sunDirection) / r, -1, 1));
+  const horizonDip = Math.acos(THREE.MathUtils.clamp(a.planetRadius / r, 0, 1));
+  return THREE.MathUtils.smoothstep(sunElevation, -horizonDip - 0.035, -horizonDip + 0.035);
+}
+
+/** CPU version of the GLSL sunlightAt: sunlight reaching p, reddened by the air it crossed. */
+export function sunlightAt(a: AtmosphereParams, p: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
+  out.copy(a.sunIntensity).multiplyScalar(sunVisibility(a, p));
+  if (a.radius <= a.planetRadius) return out; // no air
+  // Optical depth towards the sun (opticalDepthToSun): 6 samples to the top of the atmosphere.
+  const rayLength = Math.max(raySphereFar(p, a.sunDirection, a.center, a.radius), 0);
+  const ds = rayLength / 6;
+  let rayleighDepth = 0;
+  let mieDepth = 0;
+  for (let i = 0; i < 6; i++) {
+    sample.copy(a.sunDirection).multiplyScalar((i + 0.5) * ds).add(p);
+    const altitude = Math.max(sample.distanceTo(a.center) - a.planetRadius, 0);
+    rayleighDepth += Math.exp(-altitude / a.rayleighHeight) * ds;
+    mieDepth += Math.exp(-altitude / a.mieHeight) * ds;
+  }
+  return out.set(
+    out.x * Math.exp(-((a.rayleigh.x + a.absorption.x) * rayleighDepth + a.mie * 1.1 * mieDepth)),
+    out.y * Math.exp(-((a.rayleigh.y + a.absorption.y) * rayleighDepth + a.mie * 1.1 * mieDepth)),
+    out.z * Math.exp(-((a.rayleigh.z + a.absorption.z) * rayleighDepth + a.mie * 1.1 * mieDepth)),
+  );
+}
+
+/** CPU version of the GLSL skyIrradiance: light from the whole sky on a surface facing `up`. */
+export function skyIrradiance(a: AtmosphereParams, up: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
+  const daylight = THREE.MathUtils.smoothstep(up.dot(a.sunDirection), -0.25, 0.3);
+  const scatter = (rayleigh: number) => 1 - Math.exp(-(rayleigh * a.rayleighHeight + a.mie * a.mieHeight));
+  return out
+    .set(scatter(a.rayleigh.x), scatter(a.rayleigh.y), scatter(a.rayleigh.z))
+    .multiply(a.sunIntensity)
+    .multiplyScalar(0.6 * daylight);
+}
+
+/** Far intersection of a ray with a sphere (the .y of the GLSL raySphere), or -1 on a miss. */
+function raySphereFar(origin: THREE.Vector3, dir: THREE.Vector3, center: THREE.Vector3, radius: number): number {
+  toPoint.copy(origin).sub(center);
+  const b = toPoint.dot(dir);
+  const c = toPoint.lengthSq() - radius * radius;
+  const discriminant = b * b - c;
+  return discriminant < 0 ? -1 : -b + Math.sqrt(discriminant);
+}

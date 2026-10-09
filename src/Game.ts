@@ -2,13 +2,16 @@ import * as THREE from 'three';
 import { FreeFlyController } from './controls/FreeFlyController';
 import { PlayerController } from './controls/PlayerController';
 import { Input } from './core/Input';
-import { directionToFrame, orientationToFrame, orientationToUniverse } from './core/ReferenceFrame';
+import { directionToFrame, orientationToFrame, orientationToUniverse, UNIVERSE_FRAME } from './core/ReferenceFrame';
 import { Universe } from './core/Universe';
 import { saveScreenshot } from './dev/DevTools';
 import { ChunkWorkerPool } from './planet/ChunkWorkerPool';
 import type { Planet } from './planet/Planet';
+import { skyIrradiance, sunlightAt } from './render/atmosphere';
 import { RenderPipeline } from './render/RenderPipeline';
 import { createStarfield } from './render/Starfield';
+import { Ship } from './ship/Ship';
+import { ShipCamera } from './ship/ShipCamera';
 import { DebugHud, formatDistance, formatSpeed } from './ui/DebugHud';
 import { BODIES, HOME, SUN } from './world/bodies';
 import { SolarSystem } from './world/SolarSystem';
@@ -23,6 +26,12 @@ const BEACON_POSITION = new THREE.Vector3(0, 0, 560_000);
 /** Where the player starts on HOME: local direction and facing - flat ground by a bay. */
 const SPAWN_DIRECTION = new THREE.Vector3(-0.1205, -0.0173, 0.9926);
 const SPAWN_HEADING = new THREE.Vector3(0.9927, 0, 0.1205);
+/** Where the ship is parked at the start, relative to the spawn: metres ahead and to the right. */
+const SHIP_PARKING = { ahead: 16, right: 9 };
+/** How close (m, eye to ship centre) you must be to board. */
+const BOARDING_RANGE = 7;
+/** Starlight and airglow at night, added to the sky light (the same as the terrain's uNightLight). */
+const NIGHT_LIGHT = new THREE.Vector3(0.1, 0.14, 0.28);
 /** Sun elevation (degrees, rising) at the spawn point when the game starts. */
 const START_SUN_ELEVATION = 25;
 /** T cycles through these game-time multipliers (the day/night cycle speeds up). */
@@ -35,13 +44,14 @@ const HELP = `mouse    look (click to capture, Esc to release)
 W A S D  move          Shift  sprint
 Space    jump, hold for jetpack (swim up in water)
 C        dive (in water)
+E        board / leave the ship
 V        toggle free-fly camera (Space/C up/down, Q/E roll, wheel speed)
 T        time speed x1 / x10 / x60 / x300
 1-7      fly to Ember, Verdant, Lull, Rime, Sulfa, Nyx, Shard
 0  respawn on foot   9  test beacon
 F2 screenshot   F3 debug panel   F4 terrain LOD view   H help`;
 
-type Mode = 'walk' | 'fly';
+type Mode = 'walk' | 'ship' | 'fly';
 
 /**
  * Owns the renderer, the scene and all systems, and runs the frame loop:
@@ -61,7 +71,9 @@ export class Game {
   readonly player: PlayerController;
   readonly pipeline: RenderPipeline;
   readonly flyer = new FreeFlyController();
-  /** Which controller drives the camera: walking on a body, or the free-fly debug camera. */
+  readonly ship = new Ship();
+  readonly shipCamera = new ShipCamera();
+  /** Who drives the camera: the player on foot, the ship, or the free-fly debug camera. */
   mode: Mode = 'walk';
 
   /** Game time in seconds (runs `timeScale` times faster than real time). */
@@ -78,12 +90,14 @@ export class Game {
 
   private lastFrameMs = performance.now();
   private terrainDebugView = 0;
-  private readonly sunLight: THREE.DirectionalLight;
+  private readonly sunLight = new THREE.DirectionalLight();
+  private readonly skyLight = new THREE.HemisphereLight();
   private readonly beacon: TestBeacon;
   private readonly clickToPlay = document.getElementById('click-to-play')!;
   private readonly help = document.getElementById('help')!;
   private readonly jetpackBar = document.getElementById('jetpack')!;
   private readonly jetpackFill = document.getElementById('jetpack-fill')!;
+  private readonly prompt = document.getElementById('prompt')!;
 
   constructor(container: HTMLElement) {
     // No canvas antialiasing: the pipeline antialiases the final image with FXAA instead.
@@ -109,9 +123,8 @@ export class Game {
     for (const body of this.system.bodies) this.universe.root.add(body.group);
     this.home = this.system.get(HOME);
 
-    // Lights for three's built-in materials (the beacon). The terrain has its own shader.
-    this.sunLight = new THREE.DirectionalLight(0xfff4e0, 3);
-    this.universe.scene.add(this.sunLight, new THREE.AmbientLight(0x404a66, 0.6));
+    // Lights for three's built-in materials (the ship, the beacon); see updateLights.
+    this.universe.scene.add(this.sunLight, this.skyLight);
 
     // One ocean in the system: the composite pass draws the first body that has one.
     const oceanBody = this.system.bodies.find((body) => body.hasOcean) ?? this.home;
@@ -119,6 +132,7 @@ export class Game {
 
     this.beacon = new TestBeacon(BEACON_POSITION);
     this.universe.root.add(this.beacon.object);
+    this.universe.root.add(this.ship.model.object);
 
     this.system.update(this.time, this.timeScale);
     this.player = new PlayerController(this.home);
@@ -148,9 +162,42 @@ export class Game {
 
   // --- Teleports ----------------------------------------------------------------------------------
 
+  /** Back to the start: on foot at the spawn point, the ship parked next to it. */
   respawn(): void {
     this.mode = 'walk';
     this.player.spawn(this.home, SPAWN_DIRECTION, SPAWN_HEADING);
+    const up = SPAWN_DIRECTION.clone().normalize();
+    const right = new THREE.Vector3().crossVectors(SPAWN_HEADING, up).normalize();
+    const parking = up
+      .clone()
+      .multiplyScalar(this.home.radius)
+      .addScaledVector(SPAWN_HEADING, SHIP_PARKING.ahead)
+      .addScaledVector(right, SHIP_PARKING.right);
+    // Nose to the left and a little towards the spawn: you see it from the front three-quarters.
+    this.ship.placeLanded(this.home, parking, right.clone().negate().addScaledVector(SPAWN_HEADING, -0.4));
+  }
+
+  /** On foot, near the landed ship: get in. */
+  board(): void {
+    this.mode = 'ship';
+    this.shipCamera.reset();
+  }
+
+  /** In the landed ship: get out, beside the nose on the left (clear of the wing), facing ahead. */
+  disembark(): void {
+    const ship = this.ship;
+    const body = ship.frame as Planet; // a landed ship is always in its body's rotating frame
+    const side = new THREE.Vector3(-3.2, 0, -3.8).applyQuaternion(ship.orientation).add(ship.position);
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(ship.orientation);
+    this.player.spawn(body, side, forward);
+    this.mode = 'walk';
+  }
+
+  /** Can the player on foot board the ship right now? */
+  private canBoard(): boolean {
+    if (this.mode !== 'walk' || this.ship.state !== 'landed') return false;
+    const eye = this.player.planet.toUniverse(this.player.eyePosition(new THREE.Vector3()));
+    return eye.distanceTo(this.ship.universePosition(new THREE.Vector3())) < BOARDING_RANGE;
   }
 
   /** Free-fly camera in orbit around `body`, on its sunlit side, looking at it. */
@@ -190,6 +237,13 @@ export class Game {
    * needs a body underneath: from open space (outside every sphere of influence) nothing happens.
    */
   toggleFly(): void {
+    if (this.mode === 'ship') {
+      // Leave the pilot's seat for the debug camera. The ship stays where it is, holding still.
+      this.ship.velocity.set(0, 0, 0);
+      this.flyer.placeInFrame(UNIVERSE_FRAME, this.cameraPosition, this.cameraOrientation);
+      this.mode = 'fly';
+      return;
+    }
     if (this.mode === 'walk') {
       const eye = this.player.eyePosition(new THREE.Vector3());
       const orientation = this.player.eyeOrientation(new THREE.Quaternion());
@@ -235,11 +289,16 @@ export class Game {
       this.player.update(dt, this.input);
       body.toUniverse(this.player.eyePosition(this.cameraPosition), this.cameraPosition);
       orientationToUniverse(body, this.player.eyeOrientation(this.cameraOrientation), this.cameraOrientation);
+    } else if (this.mode === 'ship') {
+      const shipPosition = this.ship.universePosition(new THREE.Vector3());
+      const body = this.system.nearestBody(shipPosition);
+      this.shipCamera.update(dt, this.ship, body, this.cameraPosition, this.cameraOrientation);
     } else {
       this.updateFreeFly(dt);
       this.flyer.universePosition(this.cameraPosition);
       this.flyer.universeOrientation(this.cameraOrientation);
     }
+    this.ship.updateModel();
     this.currentBody = this.mode === 'walk' ? this.player.planet : this.system.bodyAt(this.cameraPosition);
 
     // 3. The world reacts to where the camera is now.
@@ -250,7 +309,7 @@ export class Game {
     }
     const daylight = THREE.MathUtils.smoothstep(this.sunHeight(), -0.2, 0.05);
     this.pipeline.exposure = THREE.MathUtils.lerp(NIGHT_EXPOSURE, DAY_EXPOSURE, daylight);
-    this.system.star.directionFrom(this.cameraPosition, this.sunLight.position);
+    this.updateLights();
     this.beacon.update(this.time);
 
     // 4. Last step before rendering: move the universe so the camera sits at the origin.
@@ -310,6 +369,28 @@ export class Game {
     body.updateSpin(this.time);
   }
 
+  /**
+   * Lights for three.js's built-in materials (the ship, the beacon), set to what our shaders
+   * compute at the camera: sunlight after its trip through the air (red at sunset, nothing at
+   * night) and the sky's glow from above. The terrain does the same maths in its own shader, so
+   * the ship sits in the same light as the ground around it.
+   */
+  private updateLights(): void {
+    const body = this.currentBody ?? this.system.nearestBody(this.cameraPosition);
+    const air = body.atmosphere; // positions in it are camera-relative: the camera is at 0
+    const light = sunlightAt(air, new THREE.Vector3(), new THREE.Vector3());
+    this.sunLight.color.setRGB(light.x, light.y, light.z);
+    this.sunLight.intensity = 1;
+    this.system.star.directionFrom(this.cameraPosition, this.sunLight.position);
+
+    const up = this.cameraPosition.clone().sub(body.position).normalize();
+    const sky = skyIrradiance(air, up, new THREE.Vector3()).add(NIGHT_LIGHT);
+    this.skyLight.color.setRGB(sky.x, sky.y, sky.z);
+    this.skyLight.groundColor.setRGB(sky.x * 0.3, sky.y * 0.3, sky.z * 0.3);
+    this.skyLight.intensity = 1;
+    this.skyLight.position.copy(up); // a HemisphereLight's position is its "up" direction
+  }
+
   private render(): void {
     this.renderer.info.reset();
     this.pipeline.render(this.universe.scene, this.camera, this.system.bodies.map((body) => body.atmosphere));
@@ -323,6 +404,13 @@ export class Game {
     if (input.wasPressed('Digit9')) this.goToBeacon();
     if (input.wasPressed('Digit0')) this.respawn();
     if (input.wasPressed('KeyV')) this.toggleFly();
+    if (input.wasPressed('KeyE')) {
+      if (this.canBoard()) this.board();
+      else if (this.mode === 'ship' && this.ship.state === 'landed') this.disembark();
+    }
+    if (input.wasPressed('KeyC') && this.mode === 'ship') {
+      this.shipCamera.view = this.shipCamera.view === 'chase' ? 'cockpit' : 'chase';
+    }
     if (input.wasPressed('KeyT')) {
       this.timeScale = TIME_SCALES[(TIME_SCALES.indexOf(this.timeScale) + 1) % TIME_SCALES.length];
     }
@@ -355,7 +443,15 @@ export class Game {
     this.clickToPlay.classList.toggle('hidden', this.input.pointerLocked);
     this.jetpackBar.classList.toggle('hidden', this.mode !== 'walk');
     this.jetpackFill.style.width = `${(this.player.jetpackFuel * 100).toFixed(1)}%`;
+    this.prompt.textContent = this.promptText();
     this.hud.update(dt);
+  }
+
+  /** The context hint at the bottom of the screen: which key does what right now. */
+  private promptText(): string {
+    if (this.canBoard()) return '[E] board the ship';
+    if (this.mode === 'ship' && this.ship.state === 'landed') return '[E] get out    [C] cockpit / chase view';
+    return '';
   }
 
   /**
@@ -375,8 +471,10 @@ export class Game {
     const body = this.currentBody ?? this.system.nearestBody(p);
     const elevation = THREE.MathUtils.radToDeg(Math.asin(THREE.MathUtils.clamp(this.sunHeight(), -1, 1)));
     const player = this.player;
-    const frame = this.mode === 'fly' ? this.flyer.frame.name : `${player.planet.name} (on foot)`;
-    const motion = this.mode === 'fly'
+    const frame = this.mode === 'fly' ? this.flyer.frame.name : this.mode === 'ship' ? `${this.ship.frame.name} (ship)` : `${player.planet.name} (on foot)`;
+    const motion = this.mode === 'ship'
+      ? `ship    ${this.ship.state}  ${formatSpeed(this.ship.velocity.length())}`
+      : this.mode === 'fly'
       ? `fly     ${formatSpeed(this.flyer.velocity.length())}  (wheel x${2 ** this.flyer.speedExponent})`
       : `walk    ${formatSpeed(player.speed)}  ${player.swimming ? 'swimming' : player.grounded ? 'on ground' : 'in the air'}, jetpack ${(player.jetpackFuel * 100).toFixed(0)}%`;
     const stats = { visible: 0, meshes: 0 };

@@ -142,3 +142,14 @@ icy Rime is behind.
 
 Nyx's tiny jagged moon against the violet crescent of Nyx. All bodies move on rails: circular
 orbits that are pure functions of time, parents first, then their moons.
+
+## M4 — Ship
+
+### 018 — The ship, parked by the spawn
+
+![018](018-m4-the-ship-parked-by-the-spawn.jpg)
+
+A fighter built from three.js primitives: a faceted lathe fuselage, a glass canopy, extruded
+swept wings, two engines and a tripod landing gear. Three legs always stand without wobbling
+(three points define a plane), so landing on uneven ground needs no physics. It is lit by
+three.js lights set to the same sunlight and sky light the terrain shader computes.
