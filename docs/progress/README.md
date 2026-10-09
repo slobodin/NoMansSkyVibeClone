@@ -171,3 +171,12 @@ J in space engages the pulse drive: speed = 0.5/s x the distance to the nearest 
 30 km/s. Pointed at a moon, the distance - and with it the speed - shrinks exponentially, so you
 arrive instead of crashing; the drive drops out 3 km above the surface. Verdant to Lull, from
 the spawn to standing on Lull, takes about a minute.
+
+### 021 — Landed on Lull
+
+![021](021-m4-landed-on-lull.jpg)
+
+The M4 goal: take off from Verdant, fly to Lull, land, get out, walk. Lull is tidally locked,
+so Verdant hangs in the same spot of its black sky all day. The HUD (not in these canvas
+captures) now has markers with names and distances over every body and over your ship, and a
+flight panel: ATMOSPHERE / SPACE / PULSE, speed, altitude.

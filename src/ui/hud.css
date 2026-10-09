@@ -103,9 +103,55 @@ body {
 #prompt {
   position: absolute;
   left: 50%;
-  bottom: 52px;
+  bottom: 64px;
   transform: translateX(-50%);
   font: 14px/1.4 ui-monospace, Consolas, monospace;
   letter-spacing: 0.04em;
   white-space: pre;
+}
+
+/* Ship status, bottom centre (in the ship, instead of the jetpack bar). */
+#flight {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 4px 10px;
+  font: 13px/1.4 ui-monospace, Consolas, monospace;
+  text-align: center;
+  background: rgb(0 0 0 / 0.35);
+  border-radius: 4px;
+}
+
+/* HUD markers (src/ui/Markers.ts): positioned with a transform every frame. */
+#markers {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.marker {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: -6px 0 0 -6px; /* centre the diamond on the target */
+  font: 12px ui-monospace, Consolas, monospace;
+  white-space: nowrap;
+  will-change: transform;
+}
+
+.marker-diamond {
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid rgb(255 255 255 / 0.85);
+  transform: rotate(45deg);
+  box-shadow: 0 0 2px #000;
+}
+
+.marker.hidden {
+  display: none;
 }

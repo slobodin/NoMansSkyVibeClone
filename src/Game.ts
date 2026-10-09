@@ -13,6 +13,7 @@ import { createStarfield } from './render/Starfield';
 import { Ship } from './ship/Ship';
 import { ShipCamera } from './ship/ShipCamera';
 import { DebugHud, formatDistance, formatSpeed } from './ui/DebugHud';
+import { formatRange, Markers, type MarkerTarget, type Occluder } from './ui/Markers';
 import { BODIES, HOME, SUN } from './world/bodies';
 import { SolarSystem } from './world/SolarSystem';
 import { TestBeacon } from './world/TestBeacon';
@@ -31,6 +32,8 @@ const SPAWN_HEADING = new THREE.Vector3(0.9927, 0, 0.1205);
 const SHIP_PARKING = { ahead: 16, right: 9 };
 /** How close (m, eye to ship centre) you must be to board. */
 const BOARDING_RANGE = 7;
+/** The ship's HUD marker shows when you are farther from it than this (m). */
+const SHIP_MARKER_DISTANCE = 80;
 /** How long a message like "can't land on water" stays on screen, seconds. */
 const MESSAGE_TIME = 2.5;
 /** Starlight and airglow at night, added to the sky light (the same as the terrain's uNightLight). */
@@ -104,6 +107,11 @@ export class Game {
   private readonly jetpackBar = document.getElementById('jetpack')!;
   private readonly jetpackFill = document.getElementById('jetpack-fill')!;
   private readonly prompt = document.getElementById('prompt')!;
+  private readonly flightPanel = document.getElementById('flight')!;
+  private readonly markers = new Markers(document.getElementById('markers')!);
+  private readonly bodyMarkers: MarkerTarget[];
+  private readonly shipMarker: MarkerTarget;
+  private readonly occluders: Occluder[];
   private message = '';
   private messageTimer = 0;
 
@@ -141,6 +149,17 @@ export class Game {
     this.beacon = new TestBeacon(BEACON_POSITION);
     this.universe.root.add(this.beacon.object);
     this.universe.root.add(this.ship.model.object);
+
+    // HUD markers. The positions are the live Vector3s of the bodies and the ship's model, so
+    // these lists never need updating.
+    const star = this.system.star;
+    // Most important first: when labels would overlap, the later one is hidden.
+    this.bodyMarkers = [
+      { label: star.name, position: star.position, radius: star.radius, measureToSurface: true },
+      ...this.system.bodies.map((body) => ({ label: body.name, position: body.position, radius: body.radius, measureToSurface: true })),
+    ];
+    this.shipMarker = { label: 'ship', position: this.ship.model.object.position, radius: 0, measureToSurface: false };
+    this.occluders = this.bodyMarkers.map(({ position, radius }) => ({ position, radius }));
 
     this.system.update(this.time, this.timeScale);
     this.player = new PlayerController(this.home);
@@ -464,6 +483,12 @@ export class Game {
     this.jetpackBar.classList.toggle('hidden', this.mode !== 'walk');
     this.jetpackFill.style.width = `${(this.player.jetpackFuel * 100).toFixed(1)}%`;
     this.prompt.textContent = this.promptText();
+
+    const showShip = this.mode !== 'ship' && this.cameraPosition.distanceTo(this.shipMarker.position) > SHIP_MARKER_DISTANCE;
+    this.markers.update(this.camera, this.cameraPosition, showShip ? [this.shipMarker, ...this.bodyMarkers] : this.bodyMarkers, this.occluders);
+
+    this.flightPanel.classList.toggle('hidden', this.mode !== 'ship');
+    if (this.mode === 'ship') this.flightPanel.textContent = this.flightText();
     this.hud.update(dt);
   }
 
@@ -477,6 +502,15 @@ export class Game {
     if (this.ship.pulse) return '[J] / [S] leave pulse';
     if (this.ship.canPulse) return '[J] pulse drive';
     return '';
+  }
+
+  /** The ship's status panel: flight mode and speed, then where you are. */
+  private flightText(): string {
+    const ship = this.ship;
+    const body = ship.body ?? this.system.nearestBody(this.cameraPosition);
+    const flight: Record<typeof ship.state, string> = { landed: 'LANDED', takeoff: 'TAKING OFF', landing: 'LANDING', flying: '' };
+    const mode = flight[ship.state] || (ship.pulse ? 'PULSE' : ship.spaceFactor < 0.5 ? (body.config.atmosphere ? 'ATMOSPHERE' : 'LOW ALTITUDE') : 'SPACE');
+    return `${mode}   ${formatSpeed(ship.speed)}\n${body.name}  altitude ${formatRange(ship.altitude)}`;
   }
 
   /** Shows a short message in place of the prompt (null: nothing to say). */
