@@ -10,6 +10,7 @@ import {
   UNIVERSE_FRAME,
   type ReferenceFrame,
 } from '../core/ReferenceFrame';
+import { levelRoll } from './leveling';
 
 const LOOK_SENSITIVITY = 0.0022; // radians per pixel of mouse movement
 const ROLL_SPEED = 1.5; // radians per second (Q / E)
@@ -42,10 +43,6 @@ export class FreeFlyController {
   private readonly tmpEuler = new THREE.Euler();
   private readonly tmpQuat = new THREE.Quaternion();
   private readonly wish = new THREE.Vector3();
-  private readonly forward = new THREE.Vector3();
-  private readonly cameraUp = new THREE.Vector3();
-  private readonly levelUp = new THREE.Vector3();
-  private readonly cross = new THREE.Vector3();
 
   /**
    * @param surfaceDistance distance to the nearest surface, sets the speed
@@ -61,7 +58,7 @@ export class FreeFlyController {
     const roll = rollInput * ROLL_SPEED * dt;
     this.tmpQuat.setFromEuler(this.tmpEuler.set(pitch, yaw, roll, 'YXZ'));
     this.orientation.multiply(this.tmpQuat).normalize();
-    if (up && rollInput === 0) this.levelHorizon(up, dt);
+    if (up && rollInput === 0) levelRoll(this.orientation, up, LEVELING_RATE, dt);
 
     this.speedExponent = THREE.MathUtils.clamp(this.speedExponent - input.wheelSteps, -6, 8);
 
@@ -121,23 +118,5 @@ export class FreeFlyController {
     positionToFrame(this.frame, eye, this.position);
     orientationToFrame(this.frame, orientation, this.orientation);
     this.velocity.set(0, 0, 0);
-  }
-
-  /**
-   * Rolls the camera about its view axis so that its up vector leans towards `up`. We only touch
-   * roll, never where the camera points, so it feels like a gentle auto-pilot for the horizon.
-   */
-  private levelHorizon(up: THREE.Vector3, dt: number): void {
-    const forward = this.forward.set(0, 0, -1).applyQuaternion(this.orientation);
-    const cameraUp = this.cameraUp.set(0, 1, 0).applyQuaternion(this.orientation);
-    // Target: the planet's up, with the part along the view direction removed.
-    const target = this.levelUp.copy(up).addScaledVector(forward, -up.dot(forward));
-    if (target.lengthSq() < 1e-4) return; // looking straight up or down: roll is undefined
-    target.normalize();
-    // Signed angle from cameraUp to target, measured around the forward axis.
-    const angle = Math.atan2(forward.dot(this.cross.crossVectors(cameraUp, target)), cameraUp.dot(target));
-    const step = angle * (1 - Math.exp(-LEVELING_RATE * dt));
-    // A rotation about a direction in our frame is applied from the left (premultiply).
-    this.orientation.premultiply(this.tmpQuat.setFromAxisAngle(forward, step)).normalize();
   }
 }

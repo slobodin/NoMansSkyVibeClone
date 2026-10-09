@@ -153,3 +153,12 @@ A fighter built from three.js primitives: a faceted lathe fuselage, a glass cano
 swept wings, two engines and a tripod landing gear. Three legs always stand without wobbling
 (three points define a plane), so landing on uneven ground needs no physics. It is lit by
 three.js lights set to the same sunlight and sky light the terrain shader computes.
+
+### 019 — Flying over the bay
+
+![019](019-m4-flying-over-the-bay.jpg)
+
+Atmospheric flight at 160 m/s, chase camera. Low down the ship handles like a plane: high
+"grip" turns its velocity towards the nose and the wings level themselves. Climbing out of the
+air it blends into space handling: faster, drifting, no levelling. Space takes off, E lands on
+a spot picked ahead (refused over water or slopes above 30°).

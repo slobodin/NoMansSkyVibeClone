@@ -1,20 +1,84 @@
 import * as THREE from 'three';
+import { levelRoll } from '../controls/leveling';
+import type { Input } from '../core/Input';
 import {
+  directionToFrame,
+  orientationToFrame,
   orientationToUniverse,
+  positionToFrame,
   positionToUniverse,
   UNIVERSE_FRAME,
+  velocityToFrame,
+  velocityToUniverse,
   type ReferenceFrame,
 } from '../core/ReferenceFrame';
 import type { Planet } from '../planet/Planet';
+import type { SolarSystem } from '../world/SolarSystem';
 import { FEET, GEAR_HEIGHT, ShipModel } from './shipModel';
 
 export type ShipState = 'landed' | 'takeoff' | 'flying' | 'landing';
 
 /**
- * The player's ship: its pose, its state and (in flight) how it moves.
+ * How the ship handles. It blends from PLANET to SPACE as it climbs out of a body's air: low
+ * down it flies like a plane (it goes where the nose points, gently levels its wings), up high
+ * it drifts and is much faster.
+ */
+interface Handling {
+  /** Top speed with W held, m/s. */
+  maxSpeed: number;
+  /** Top speed with W + Shift. */
+  boostSpeed: number;
+  /** Thrust along the nose, m/s^2 (doubled when boosting and when braking). */
+  acceleration: number;
+  /** 1/s: how fast sideways drift dies out. High = plane-like, low = drifting as in space. */
+  grip: number;
+  /** 1/s: how fast speed above the current top speed bleeds off (air brakes / flight computer). */
+  drag: number;
+}
+const PLANET: Handling = { maxSpeed: 160, boostSpeed: 400, acceleration: 60, grip: 2.5, drag: 1.2 };
+const SPACE: Handling = { maxSpeed: 1000, boostSpeed: 2500, acceleration: 300, grip: 0.4, drag: 0.5 };
+
+/** On a body without air, the "low-altitude" zone where the ship flies like a plane. */
+const AIRLESS_CEILING = 1500; // m
+const MOUSE_SENSITIVITY = 0.0022; // radians per pixel
+/** 1/s: how quickly the ship turns to where the mouse asked (higher = snappier). */
+const STEER_RESPONSE = 10;
+const MAX_PENDING_TURN = 0.6; // radians of mouse input that can queue up
+const ROLL_SPEED = 2; // rad/s (A / D)
+const LEVEL_RATE = 1.5; // 1/s, auto-levelling of the wings in the air
+/** The hull centre never gets closer to the floor (terrain or sea) than this while flying. */
+const CLEARANCE = GEAR_HEIGHT;
+const TAKEOFF_TIME = 2.5; // s of vertical lift before you get control
+const TAKEOFF_SPEED = 15; // m/s
+/** You can land from this high above the ground. */
+const LANDING_RANGE = 300; // m
+const MAX_LANDING_SLOPE = THREE.MathUtils.degToRad(30);
+const MAX_DESCENT_SPEED = 40; // m/s
+/** 1/s: how quickly the ship glides over to the landing spot (it covers 1/rate of a second's flight). */
+const LANDING_GLIDE_RATE = 2;
+/**
+ * Speed limit right after switching frames. Converting the velocity keeps the ship's momentum,
+ * but with time sped up x300 planets move at tens of km/s, and the arcade ship should not
+ * inherit that.
+ */
+const MAX_FRAME_SPEED = 3 * SPACE.boostSpeed;
+
+const FORWARD = new THREE.Vector3(0, 0, -1);
+
+/**
+ * The player's ship: its pose, its state machine and its flight model.
  *
- * Like the free camera, the ship keeps its pose in a reference frame: standing on a planet that
- * is the planet's rotating frame, so a landed ship simply stays put on the spinning ground.
+ *   landed --Space--> takeoff --(2.5 s)--> flying --E (low enough)--> landing --(touchdown)--> landed
+ *
+ * Like the free camera, the ship keeps its pose and velocity in a reference frame, chosen by
+ * SolarSystem.frameAt: near a body that is the body's rotating frame (a landed ship simply stays
+ * put on the spinning ground), further out the body's orbit frame, then the star's frame. On a
+ * switch the *velocity* is converted too, frame motion included (ReferenceFrame.ts), so crossing
+ * from one sphere of influence into another keeps your momentum.
+ *
+ * The flight model is arcade, not Newtonian: no gravity, and the velocity relative to the
+ * current frame is steered towards the nose by `grip`, accelerated by W and bled off by `drag`.
+ * Collision is analytic, like the player's: the hull centre stays CLEARANCE above the floor.
  */
 export class Ship {
   readonly model = new ShipModel();
@@ -25,14 +89,108 @@ export class Ship {
   readonly velocity = new THREE.Vector3();
   state: ShipState = 'landed';
 
+  /** The body nearest to the ship, its altitude above the floor there, and 0 (air) .. 1 (space). */
+  body: Planet | null = null;
+  altitude = 0;
+  spaceFactor = 1;
+
+  private timer = 0;
+  private gear = 1;
+  private thrust = 0;
+  private pendingPitch = 0;
+  private pendingYaw = 0;
+  private rollSpeed = 0;
+
+  private readonly universe = new THREE.Vector3();
+  private readonly local = new THREE.Vector3();
+  private readonly up = new THREE.Vector3();
+  private readonly nose = new THREE.Vector3();
+  private readonly lateral = new THREE.Vector3();
+  private readonly targetPosition = new THREE.Vector3();
+  private readonly targetOrientation = new THREE.Quaternion();
+  private readonly tmpQuat = new THREE.Quaternion();
+  private readonly tmpEuler = new THREE.Euler();
+  private readonly tmp = new THREE.Vector3();
+
   /** Puts the ship down on `body`, standing at local direction `dir` with its nose towards `heading`. */
   placeLanded(body: Planet, dir: THREE.Vector3, heading: THREE.Vector3): void {
     this.frame = body;
     restingPose(body, dir, heading, this.position, this.orientation);
     this.velocity.set(0, 0, 0);
     this.state = 'landed';
-    this.model.setGear(1);
-    this.model.setEngines(0, false);
+    this.gear = 1;
+    this.thrust = 0;
+    this.updateModel();
+  }
+
+  /** Speed relative to the current frame, m/s. */
+  get speed(): number {
+    return this.velocity.length();
+  }
+
+  /** True when E would start a landing (low enough, flying). */
+  get canLand(): boolean {
+    return this.state === 'flying' && this.altitude < LANDING_RANGE;
+  }
+
+  /**
+   * Starts landing. The spot is picked now, where the ship would come to a stop if it braked
+   * smoothly from its current speed - a little ahead - and checked: not water, not too steep.
+   * Returns why not, if it can't land there.
+   */
+  land(): string | null {
+    const body = this.body;
+    if (!this.canLand || !body) return null;
+    this.setFrame(body); // (already is: this close to the ground we fly in the rotating frame)
+    const up = this.tmp.copy(this.position).normalize();
+    const vertical = this.velocity.dot(up);
+    const spot = this.local
+      .copy(this.velocity)
+      .addScaledVector(up, -vertical)
+      .multiplyScalar(1 / LANDING_GLIDE_RATE)
+      .add(this.position);
+    if (body.hasOcean && body.terrainHeight(spot) < 0) return "can't land on water";
+    const slope = restingPose(body, spot, this.noseDirection(), this.targetPosition, this.targetOrientation);
+    if (slope > MAX_LANDING_SLOPE) return 'too steep to land here';
+    this.state = 'landing';
+    return null;
+  }
+
+  update(dt: number, input: Input, system: SolarSystem): void {
+    // Where are we? The nearest body gives the altitude, "up", and air vs space flight.
+    this.universePosition(this.universe);
+    const body = system.nearestBody(this.universe);
+    this.body = body;
+    if (this.state === 'flying') this.setFrame(system.frameAt(this.universe));
+    this.measureAltitude(body);
+    const ceiling = body.config.atmosphere?.height ?? AIRLESS_CEILING;
+    this.spaceFactor = THREE.MathUtils.smoothstep(this.altitude, ceiling, ceiling * 1.5);
+
+    switch (this.state) {
+      case 'landed':
+        this.velocity.set(0, 0, 0);
+        if (input.wasPressed('Space')) {
+          this.state = 'takeoff';
+          this.timer = 0;
+        }
+        this.thrust = 0;
+        break;
+      case 'takeoff':
+        this.takeOff(dt);
+        break;
+      case 'flying':
+        this.fly(dt, input);
+        break;
+      case 'landing':
+        this.descend(dt);
+        break;
+    }
+
+    if (this.state === 'flying' || this.state === 'takeoff') {
+      this.position.addScaledVector(this.velocity, dt);
+      this.collide(body);
+    }
+    this.updateModel();
   }
 
   universePosition(out: THREE.Vector3): THREE.Vector3 {
@@ -43,11 +201,158 @@ export class Ship {
     return orientationToUniverse(this.frame, this.orientation, out);
   }
 
-  /** Copies the universe pose to the 3D model. Call once per frame, after the frames have moved. */
+  /**
+   * Switches to another reference frame without changing anything physical: the same universe
+   * position, orientation and *velocity* (frame motion included), just expressed differently.
+   */
+  setFrame(frame: ReferenceFrame): void {
+    if (frame === this.frame) return;
+    const position = positionToUniverse(this.frame, this.position, new THREE.Vector3());
+    const orientation = orientationToUniverse(this.frame, this.orientation, new THREE.Quaternion());
+    const velocity = velocityToUniverse(this.frame, this.position, this.velocity, new THREE.Vector3());
+    this.frame = frame;
+    positionToFrame(frame, position, this.position);
+    orientationToFrame(frame, orientation, this.orientation);
+    velocityToFrame(frame, position, velocity, this.velocity);
+    if (this.velocity.length() > MAX_FRAME_SPEED) this.velocity.setLength(MAX_FRAME_SPEED);
+  }
+
+  /** Copies the universe pose to the 3D model, plus gear and engine glow. */
   updateModel(): void {
     this.universePosition(this.model.object.position);
     this.universeOrientation(this.model.object.quaternion);
+    this.model.setGear(this.gear);
+    this.model.setEngines(this.thrust, false);
   }
+
+  // --- States -------------------------------------------------------------------------------------
+
+  /** Straight up for a couple of seconds, tucking the gear away, then hand over to the pilot. */
+  private takeOff(dt: number): void {
+    this.timer += dt;
+    const lift = THREE.MathUtils.smoothstep(this.timer, 0, 0.6) * TAKEOFF_SPEED;
+    this.velocity.copy(this.up).multiplyScalar(lift);
+    this.gear = 1 - THREE.MathUtils.smoothstep(this.timer, 0.8, 1.8);
+    this.thrust = 0.5;
+    if (this.timer >= TAKEOFF_TIME) {
+      this.state = 'flying';
+      this.pendingPitch = this.pendingYaw = this.rollSpeed = 0;
+    }
+  }
+
+  private fly(dt: number, input: Input): void {
+    // --- Steering: mouse = pitch and yaw, A / D = roll ---
+    // Mouse movement queues up a turn that is played out over a few frames: smooth, but still
+    // exactly as far as the mouse moved.
+    this.pendingPitch = THREE.MathUtils.clamp(this.pendingPitch - input.mouseDY * MOUSE_SENSITIVITY, -MAX_PENDING_TURN, MAX_PENDING_TURN);
+    this.pendingYaw = THREE.MathUtils.clamp(this.pendingYaw - input.mouseDX * MOUSE_SENSITIVITY, -MAX_PENDING_TURN, MAX_PENDING_TURN);
+    const take = 1 - Math.exp(-STEER_RESPONSE * dt);
+    const pitch = this.pendingPitch * take;
+    const yaw = this.pendingYaw * take;
+    this.pendingPitch -= pitch;
+    this.pendingYaw -= yaw;
+    const rollInput = input.axis('KeyD', 'KeyA'); // A = roll left = +Z rotation
+    this.rollSpeed += (rollInput * ROLL_SPEED - this.rollSpeed) * (1 - Math.exp(-6 * dt));
+    this.tmpQuat.setFromEuler(this.tmpEuler.set(pitch, yaw, this.rollSpeed * dt, 'YXZ'));
+    this.orientation.multiply(this.tmpQuat).normalize();
+    // In the air the wings level themselves; in space there is no "level".
+    const inAir = 1 - this.spaceFactor;
+    if (rollInput === 0 && inAir > 0) levelRoll(this.orientation, this.up, LEVEL_RATE * inAir, dt);
+
+    // --- Thrust: split the velocity into "along the nose" and "sideways" ---
+    const h = blendHandling(this.spaceFactor);
+    const nose = this.noseDirection();
+    let speed = this.velocity.dot(nose);
+    const lateral = this.lateral.copy(this.velocity).addScaledVector(nose, -speed);
+    const forward = input.isDown('KeyW');
+    const boosting = forward && input.isDown('ShiftLeft');
+    const top = boosting ? h.boostSpeed : h.maxSpeed;
+    if (forward && speed < top) {
+      speed = Math.min(speed + h.acceleration * (boosting ? 2 : 1) * dt, top);
+    } else if (input.isDown('KeyS')) {
+      speed = approach(speed, 0, 2 * h.acceleration * dt); // brake down to a hover
+    }
+    // Neither: cruise control, keep the speed. Above the top speed (after a boost, or diving
+    // in from space), the excess bleeds off.
+    if (speed > top) speed = top + (speed - top) * Math.exp(-h.drag * dt);
+    lateral.multiplyScalar(Math.exp(-h.grip * dt));
+    this.velocity.copy(nose).multiplyScalar(speed).add(lateral);
+
+    this.thrust = boosting ? 1 : forward ? 0.6 : 0.12;
+    this.gear = Math.max(0, this.gear - dt); // tuck the gear away
+  }
+
+  /**
+   * Automatic landing onto the pose chosen by land(): glide over to the spot (the remaining
+   * horizontal offset shrinks exponentially, which starts at the current speed and eases out),
+   * sink onto the gear - slower the closer the ground - and turn to the resting orientation.
+   */
+  private descend(dt: number): void {
+    this.orientation.slerp(this.targetOrientation, 1 - Math.exp(-3 * dt));
+    this.gear = Math.min(1, this.gear + dt);
+    this.thrust = 0.3;
+
+    const up = this.tmp.copy(this.targetPosition).normalize();
+    const offset = this.lateral.copy(this.position).sub(this.targetPosition);
+    const height = offset.dot(up);
+    offset.addScaledVector(up, -height); // horizontal part only
+    const descent = Math.min(THREE.MathUtils.clamp(height * 1.5, 1.5, MAX_DESCENT_SPEED) * dt, height);
+    offset.multiplyScalar(Math.exp(-LANDING_GLIDE_RATE * dt));
+
+    const before = this.local.copy(this.position);
+    this.position.copy(this.targetPosition).add(offset).addScaledVector(up, height - descent);
+    this.velocity.subVectors(this.position, before).divideScalar(Math.max(dt, 1e-6));
+
+    if (height - descent < 0.01 && offset.length() < 0.05) {
+      this.position.copy(this.targetPosition);
+      this.orientation.copy(this.targetOrientation);
+      this.velocity.set(0, 0, 0);
+      this.gear = 1;
+      this.thrust = 0;
+      this.state = 'landed';
+    }
+  }
+
+  // --- Helpers ------------------------------------------------------------------------------------
+
+  private noseDirection(): THREE.Vector3 {
+    return this.nose.copy(FORWARD).applyQuaternion(this.orientation);
+  }
+
+  /** Altitude above the body's floor, and the local "up" in the ship's frame axes. */
+  private measureAltitude(body: Planet): void {
+    this.universePosition(this.universe);
+    body.toLocal(this.universe, this.local);
+    this.altitude = this.local.length() - body.radius - body.floorHeight(this.local);
+    this.tmp.copy(this.universe).sub(body.position).normalize();
+    directionToFrame(this.frame, this.tmp, this.up);
+  }
+
+  /** Keeps the hull CLEARANCE above the floor; moving into the ground, you slide along it. */
+  private collide(body: Planet): void {
+    this.measureAltitude(body);
+    if (this.altitude >= CLEARANCE) return;
+    this.position.addScaledVector(this.up, CLEARANCE - this.altitude);
+    const into = this.velocity.dot(this.up);
+    if (into < 0) this.velocity.addScaledVector(this.up, -into);
+    this.altitude = CLEARANCE;
+  }
+}
+
+function blendHandling(t: number): Handling {
+  const mix = (a: number, b: number) => a + (b - a) * t;
+  return {
+    maxSpeed: mix(PLANET.maxSpeed, SPACE.maxSpeed),
+    boostSpeed: mix(PLANET.boostSpeed, SPACE.boostSpeed),
+    acceleration: mix(PLANET.acceleration, SPACE.acceleration),
+    grip: mix(PLANET.grip, SPACE.grip),
+    drag: mix(PLANET.drag, SPACE.drag),
+  };
+}
+
+/** Moves `current` towards `target` by at most `maxDelta`. */
+function approach(current: number, target: number, maxDelta: number): number {
+  return current < target ? Math.min(current + maxDelta, target) : Math.max(current - maxDelta, target);
 }
 
 const groundPoints = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];

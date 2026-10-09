@@ -30,6 +30,8 @@ const SPAWN_HEADING = new THREE.Vector3(0.9927, 0, 0.1205);
 const SHIP_PARKING = { ahead: 16, right: 9 };
 /** How close (m, eye to ship centre) you must be to board. */
 const BOARDING_RANGE = 7;
+/** How long a message like "can't land on water" stays on screen, seconds. */
+const MESSAGE_TIME = 2.5;
 /** Starlight and airglow at night, added to the sky light (the same as the terrain's uNightLight). */
 const NIGHT_LIGHT = new THREE.Vector3(0.1, 0.14, 0.28);
 /** Sun elevation (degrees, rising) at the spawn point when the game starts. */
@@ -40,11 +42,13 @@ const TIME_SCALES = [1, 10, 60, 300];
 const DAY_EXPOSURE = 0.75;
 const NIGHT_EXPOSURE = 3;
 
-const HELP = `mouse    look (click to capture, Esc to release)
+const HELP = `ON FOOT  mouse look (click to capture, Esc to release)
 W A S D  move          Shift  sprint
 Space    jump, hold for jetpack (swim up in water)
 C        dive (in water)
-E        board / leave the ship
+E        board the ship (when next to it)
+SHIP     mouse pitch/yaw   A/D roll   W/S throttle/brake   Shift boost
+Space    take off      E  land / get out      C  chase / cockpit view
 V        toggle free-fly camera (Space/C up/down, Q/E roll, wheel speed)
 T        time speed x1 / x10 / x60 / x300
 1-7      fly to Ember, Verdant, Lull, Rime, Sulfa, Nyx, Shard
@@ -98,6 +102,8 @@ export class Game {
   private readonly jetpackBar = document.getElementById('jetpack')!;
   private readonly jetpackFill = document.getElementById('jetpack-fill')!;
   private readonly prompt = document.getElementById('prompt')!;
+  private message = '';
+  private messageTimer = 0;
 
   constructor(container: HTMLElement) {
     // No canvas antialiasing: the pipeline antialiases the final image with FXAA instead.
@@ -290,9 +296,8 @@ export class Game {
       body.toUniverse(this.player.eyePosition(this.cameraPosition), this.cameraPosition);
       orientationToUniverse(body, this.player.eyeOrientation(this.cameraOrientation), this.cameraOrientation);
     } else if (this.mode === 'ship') {
-      const shipPosition = this.ship.universePosition(new THREE.Vector3());
-      const body = this.system.nearestBody(shipPosition);
-      this.shipCamera.update(dt, this.ship, body, this.cameraPosition, this.cameraOrientation);
+      this.ship.update(dt, this.input, this.system);
+      this.shipCamera.update(dt, this.ship, this.ship.body!, this.cameraPosition, this.cameraOrientation);
     } else {
       this.updateFreeFly(dt);
       this.flyer.universePosition(this.cameraPosition);
@@ -383,8 +388,10 @@ export class Game {
     this.sunLight.intensity = 1;
     this.system.star.directionFrom(this.cameraPosition, this.sunLight.position);
 
+    // The sky glows only while you are inside the air: it fades out on the way up to space.
     const up = this.cameraPosition.clone().sub(body.position).normalize();
-    const sky = skyIrradiance(air, up, new THREE.Vector3()).add(NIGHT_LIGHT);
+    const airAbove = 1 - THREE.MathUtils.smoothstep(body.altitude(this.cameraPosition), 0, air.radius - air.planetRadius);
+    const sky = skyIrradiance(air, up, new THREE.Vector3()).multiplyScalar(airAbove).add(NIGHT_LIGHT);
     this.skyLight.color.setRGB(sky.x, sky.y, sky.z);
     this.skyLight.groundColor.setRGB(sky.x * 0.3, sky.y * 0.3, sky.z * 0.3);
     this.skyLight.intensity = 1;
@@ -407,6 +414,7 @@ export class Game {
     if (input.wasPressed('KeyE')) {
       if (this.canBoard()) this.board();
       else if (this.mode === 'ship' && this.ship.state === 'landed') this.disembark();
+      else if (this.mode === 'ship' && this.ship.canLand) this.showMessage(this.ship.land());
     }
     if (input.wasPressed('KeyC') && this.mode === 'ship') {
       this.shipCamera.view = this.shipCamera.view === 'chase' ? 'cockpit' : 'chase';
@@ -440,6 +448,7 @@ export class Game {
   }
 
   private updateHud(dt: number): void {
+    this.messageTimer = Math.max(0, this.messageTimer - dt);
     this.clickToPlay.classList.toggle('hidden', this.input.pointerLocked);
     this.jetpackBar.classList.toggle('hidden', this.mode !== 'walk');
     this.jetpackFill.style.width = `${(this.player.jetpackFuel * 100).toFixed(1)}%`;
@@ -449,9 +458,19 @@ export class Game {
 
   /** The context hint at the bottom of the screen: which key does what right now. */
   private promptText(): string {
+    if (this.messageTimer > 0) return this.message;
     if (this.canBoard()) return '[E] board the ship';
-    if (this.mode === 'ship' && this.ship.state === 'landed') return '[E] get out    [C] cockpit / chase view';
+    if (this.mode !== 'ship') return '';
+    if (this.ship.state === 'landed') return '[Space] take off    [E] get out    [C] view';
+    if (this.ship.canLand) return '[E] land';
     return '';
+  }
+
+  /** Shows a short message in place of the prompt (null: nothing to say). */
+  private showMessage(text: string | null): void {
+    if (!text) return;
+    this.message = text;
+    this.messageTimer = MESSAGE_TIME;
   }
 
   /**
@@ -473,7 +492,7 @@ export class Game {
     const player = this.player;
     const frame = this.mode === 'fly' ? this.flyer.frame.name : this.mode === 'ship' ? `${this.ship.frame.name} (ship)` : `${player.planet.name} (on foot)`;
     const motion = this.mode === 'ship'
-      ? `ship    ${this.ship.state}  ${formatSpeed(this.ship.velocity.length())}`
+      ? `ship    ${this.ship.state}  ${formatSpeed(this.ship.speed)}  alt ${formatDistance(this.ship.altitude)}  ${this.ship.spaceFactor < 0.5 ? 'air' : 'space'} flight (${this.ship.spaceFactor.toFixed(2)})`
       : this.mode === 'fly'
       ? `fly     ${formatSpeed(this.flyer.velocity.length())}  (wheel x${2 ** this.flyer.speedExponent})`
       : `walk    ${formatSpeed(player.speed)}  ${player.swimming ? 'swimming' : player.grounded ? 'on ground' : 'in the air'}, jetpack ${(player.jetpackFuel * 100).toFixed(0)}%`;
